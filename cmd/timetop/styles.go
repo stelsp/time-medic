@@ -1,0 +1,68 @@
+// Same night-shift console language as merge-medic: sharp borders, in-border
+// titles, one amber accent, color otherwise reserved for state.
+package main
+
+import (
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
+
+var (
+	bold    = lipgloss.NewStyle().Bold(true)
+	dim     = lipgloss.NewStyle().Faint(true)
+	green   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	amber   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	amberB  = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	borderC = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	section = lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder(), false, true, true, true).
+		BorderForeground(lipgloss.Color("238")).
+		Padding(0, 1)
+)
+
+// titledBox draws a panel with its title embedded in the top border:
+// ┌─ WEEK ─ 41h20m ─────────┐
+func titledBox(w int, title, meta, body string, height int, focused bool) string {
+	st := section.Width(w - 2)
+	bs := borderC
+	if focused {
+		st = st.BorderForeground(lipgloss.Color("214"))
+		bs = amber
+	}
+	if height > 0 {
+		st = st.Height(height)
+	}
+	label := amberB.Render(" " + title + " ")
+	if meta != "" {
+		label += dim.Render(meta + " ")
+	}
+	rest := w - 3 - lipgloss.Width(label)
+	if rest < 0 {
+		rest = 0
+	}
+	top := bs.Render("┌─") + label + bs.Render(strings.Repeat("─", rest)+"┐")
+	return top + "\n" + st.Render(body)
+}
+
+// selMark marks the cursor row with an amber bar; the row keeps its colors.
+func selMark(row string) string {
+	return amberB.Render("▎") + strings.TrimPrefix(row, " ")
+}
+
+// gauge renders progress against the weekly target.
+func gauge(mins int, targetHours float64, width int) string {
+	target := int(targetHours * 60)
+	n := 0
+	if target > 0 {
+		n = mins * width / target
+	}
+	if n > width {
+		n = width
+	}
+	filled := green
+	if n >= width {
+		filled = amber
+	}
+	return filled.Render(strings.Repeat("█", n)) + dim.Render(strings.Repeat("░", width-n))
+}
