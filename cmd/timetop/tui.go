@@ -359,6 +359,15 @@ func (m model) dayBody(rows int) string {
 			s.Start.Format("15:04"), s.End.Format("15:04"),
 			hm(int(s.End.Sub(s.Start).Minutes())), s.Project))
 	}
+	if len(day.Tasks) > 0 {
+		lines = append(lines, dim.Render(fmt.Sprintf(" ── tasks %d ──", len(day.Tasks))))
+		top := day.Tasks[0].Mins
+		for _, ts := range day.Tasks {
+			lines = append(lines, fmt.Sprintf(" %-24s %s %8s  %s %s",
+				trunc(ts.Label(), 24), barC(ts.Mins, top, 10), hm(ts.Mins),
+				stateStyled(ts.State()), dim.Render(fmt.Sprintf("%d commits", len(ts.Commits)))))
+		}
+	}
 	var commits []string
 	for _, p := range day.Projects {
 		for _, c := range p.Commits {

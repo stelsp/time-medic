@@ -39,14 +39,15 @@ type DayStat struct {
 // TaskStat is one unit of work as the forge sees it: a branch, the time that
 // went into it, what it produced and whether it landed.
 type TaskStat struct {
-	Project string
-	Branch  string
-	Ref     string // issue reference, when the branch or its commits name one
-	Mins    int
-	Commits []Commit
-	Merged  bool
-	Gone    bool // the branch is no longer in the repo (merged and deleted)
-	Last    time.Time
+	Project  string
+	Branch   string
+	Ref      string // issue reference, when the branch or its commits name one
+	Mins     int
+	Commits  []Commit
+	Branches []string // every branch that carried this task in the period
+	Merged   bool
+	Gone     bool // no branch of this task is left in the repo
+	Last     time.Time
 }
 
 type Report struct {
@@ -207,26 +208,34 @@ func Build(act *Activity, cfg Config, p Period) Report {
 	return rep
 }
 
-// buildTasks slices the same minutes by branch instead of by project, then
-// asks git what each branch produced and whether it landed.
+// buildTasks slices the same minutes by branch, then folds the branches of one
+// issue together: feat-116, feat-116-s2 and feat-116-s47 are one task, and a
+// standup wants the task, not the branch stack.
 func buildTasks(act *Activity, cfg Config, p Period, author string) []TaskStat {
-	var out []TaskStat
+	type group struct {
+		stat    TaskStat
+		minutes map[minute]bool
+		shas    map[string]bool
+	}
+	groups := map[string]*group{}
+
 	for key, set := range act.Tasks {
 		proj, branch := splitTask(key)
-		mins, last := 0, time.Time{}
+		mins := map[minute]bool{}
+		last := time.Time{}
 		for m := range set {
 			t := time.Unix(int64(m)*60, 0)
 			if !t.Before(p.From) && t.Before(p.To) {
-				mins++
+				mins[m] = true
 				if t.After(last) {
 					last = t
 				}
 			}
 		}
-		if mins == 0 {
+		if len(mins) == 0 {
 			continue
 		}
-		ts := TaskStat{Project: proj, Branch: branch, Mins: mins, Last: last}
+		ts := TaskStat{Project: proj, Branch: branch, Last: last, Branches: []string{branch}}
 		if root := act.Roots[proj]; root != "" && branch != "" {
 			a := author
 			if a == "" {
@@ -237,9 +246,52 @@ func buildTasks(act *Activity, cfg Config, p Period, author string) []TaskStat {
 			ts.Merged = branchMerged(root, branch)
 		}
 		ts.Ref = taskRef(branch, ts.Commits)
-		out = append(out, ts)
+
+		gkey := proj + taskSep + branch
+		if ts.Ref != "" {
+			gkey = proj + taskSep + ts.Ref
+		}
+		g := groups[gkey]
+		if g == nil {
+			g = &group{stat: ts, minutes: map[minute]bool{}, shas: map[string]bool{}}
+			g.stat.Commits = nil
+			g.stat.Branches = nil
+			groups[gkey] = g
+		}
+		for m := range mins {
+			g.minutes[m] = true
+		}
+		for _, c := range ts.Commits {
+			if !g.shas[c.SHA] {
+				g.shas[c.SHA] = true
+				g.stat.Commits = append(g.stat.Commits, c)
+			}
+		}
+		g.stat.Branches = append(g.stat.Branches, branch)
+		// a task is merged only when every branch that carried it landed, and
+		// gone only when none of them is left
+		g.stat.Merged = g.stat.Merged && ts.Merged
+		g.stat.Gone = g.stat.Gone && ts.Gone
+		if ts.Last.After(g.stat.Last) {
+			g.stat.Last = ts.Last
+			g.stat.Branch = branch // the branch worked on most recently names it
+		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Mins > out[j].Mins })
+
+	out := make([]TaskStat, 0, len(groups))
+	for _, g := range groups {
+		st := g.stat
+		st.Mins = len(g.minutes)
+		sort.Slice(st.Commits, func(i, j int) bool { return st.Commits[i].When.After(st.Commits[j].When) })
+		sort.Strings(st.Branches)
+		out = append(out, st)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Mins != out[j].Mins {
+			return out[i].Mins > out[j].Mins
+		}
+		return out[i].Label() < out[j].Label()
+	})
 	return out
 }
 
@@ -416,6 +468,16 @@ func RenderDaily(rep Report, md bool) string {
 	}
 	fmt.Fprint(&b, post(md)+"\n")
 
+	if len(rep.Tasks) > 0 {
+		fmt.Fprintf(&b, "%sTASKS\n%s", h2, pre(md))
+		top := rep.Tasks[0].Mins
+		for _, t := range rep.Tasks {
+			fmt.Fprintf(&b, "%-24s %-10s %8s  %-7s %3d commits\n", trunc(t.Label(), 24),
+				bar(t.Mins, top, 10), hm(t.Mins), t.State(), len(t.Commits))
+		}
+		fmt.Fprint(&b, post(md)+"\n")
+	}
+
 	fmt.Fprintf(&b, "%sSESSIONS\n%s", h2, pre(md))
 	for _, s := range rep.Sessions {
 		fmt.Fprintf(&b, "%s–%s  %8s  %s\n", s.Start.Format("15:04"), s.End.Format("15:04"),
@@ -573,16 +635,20 @@ func RenderTasks(rep Report, md bool) string {
 	return b.String()
 }
 
-// Label is the task as a human names it: the issue reference when there is
-// one, otherwise the branch.
+// Label is the task as a human names it: the issue when there is one, the
+// branch otherwise. Several branches behind one issue collapse into it.
 func (t TaskStat) Label() string {
 	switch {
-	case t.Branch == "":
+	case t.Branch == "" && t.Ref == "":
 		return "(no branch)"
-	case t.Ref != "" && !strings.Contains(t.Branch, strings.TrimPrefix(t.Ref, "#")):
-		return t.Branch + " " + t.Ref
-	default:
+	case t.Ref == "":
 		return t.Branch
+	case len(t.Branches) > 1:
+		return fmt.Sprintf("%s (%d branches)", t.Ref, len(t.Branches))
+	case strings.Contains(t.Branch, strings.TrimPrefix(t.Ref, "#")):
+		return t.Branch
+	default:
+		return t.Branch + " " + t.Ref
 	}
 }
 

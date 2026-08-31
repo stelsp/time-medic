@@ -23,14 +23,27 @@ const usage = `timetop — autonomous time tracking from your work trail
   --md                       markdown output, ready to paste
   --full                     every commit, not just the first ten per project
   --once                     render the dashboard once to stdout (smoke test)
+  --out PATH                 write the report to a file instead of stdout
+  --slack                    post the report to SLACK_WEBHOOK from the config
 `
 
 func main() {
 	cfg := LoadConfig()
 	args := os.Args[1:]
-	md, once := false, false
+	md, once, slack := false, false, false
+	out := ""
 	var rest []string
-	for _, a := range args {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if v, ok := strings.CutPrefix(a, "--out="); ok {
+			out = v
+			continue
+		}
+		if a == "--out" && i+1 < len(args) {
+			out = args[i+1]
+			i++
+			continue
+		}
 		switch a {
 		case "--md":
 			md = true
@@ -38,6 +51,8 @@ func main() {
 			weeklyCommitLimit = 0
 		case "--once":
 			once = true
+		case "--slack":
+			slack = true
 		case "-h", "--help", "help":
 			fmt.Print(usage)
 			return
@@ -64,13 +79,13 @@ func main() {
 		runTUI(cfg)
 	case "daily", "day", "d":
 		act := mustScan(cfg)
-		fmt.Print(RenderDaily(Build(act, cfg, Daily(parseDay(when))), md))
+		deliver(cfg, RenderDaily(Build(act, cfg, Daily(parseDay(when))), md || slack), out, slack)
 	case "weekly", "week", "w":
 		act := mustScan(cfg)
-		fmt.Print(RenderWeekly(BuildWeekly(act, cfg, parseWeek(when)), md))
+		deliver(cfg, RenderWeekly(BuildWeekly(act, cfg, parseWeek(when)), md || slack), out, slack)
 	case "tasks", "t":
 		act := mustScan(cfg)
-		fmt.Print(RenderTasks(Build(act, cfg, Weekly(parseWeek(when))), md))
+		deliver(cfg, RenderTasks(Build(act, cfg, Weekly(parseWeek(when))), md || slack), out, slack)
 	case "scan":
 		act := mustScan(cfg)
 		total := 0
@@ -147,5 +162,31 @@ func runTUI(cfg Config) {
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+}
+
+// deliver puts a rendered report where the flags asked for it. Stdout stays
+// the default: a report is only published when the user types --slack.
+func deliver(cfg Config, report, out string, slack bool) {
+	printed := false
+	if out != "" {
+		path, err := writeOut(out, report)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "write:", err)
+			os.Exit(1)
+		}
+		fmt.Println("written to", path)
+		printed = true
+	}
+	if slack {
+		if err := postSlack(cfg.SlackWebhook, report); err != nil {
+			fmt.Fprintln(os.Stderr, "slack:", err)
+			os.Exit(1)
+		}
+		fmt.Println("posted to Slack")
+		printed = true
+	}
+	if !printed {
+		fmt.Print(report)
 	}
 }

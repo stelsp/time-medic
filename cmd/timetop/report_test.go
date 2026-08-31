@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -202,5 +204,67 @@ func TestWindowMarksWhatIsCut(t *testing.T) {
 func TestCompactKeepsHeadersOnOneLine(t *testing.T) {
 	if compact(950) != "950" || compact(12_400) != "12k" || compact(1_572_000_000) != "1572.0M" {
 		t.Fatalf("%s %s %s", compact(950), compact(12_400), compact(1_572_000_000))
+	}
+}
+
+func TestBuildTasksFoldsBranchesOfOneIssue(t *testing.T) {
+	base := time.Date(2026, 8, 26, 9, 0, 0, 0, time.Local).Unix() / 60
+	set := func(offsets ...int64) map[minute]bool {
+		m := map[minute]bool{}
+		for _, o := range offsets {
+			m[minute(base+o)] = true
+		}
+		return m
+	}
+	act := &Activity{
+		Minutes: map[string]map[minute]bool{"proj": set(0, 1, 2, 3)},
+		Tasks: map[string]map[minute]bool{
+			taskKey("proj", "feat-116"):    set(0, 1),
+			taskKey("proj", "feat-116-s2"): set(1, 2), // overlaps by one minute
+			taskKey("proj", "chore-x"):     set(3),
+		},
+		Roots: map[string]string{},
+	}
+	rep := Build(act, Config{GapMinutes: 15}, Daily(time.Unix(base*60, 0)))
+	if len(rep.Tasks) != 2 {
+		t.Fatalf("two tasks expected (#116 and chore-x), got %d: %+v", len(rep.Tasks), rep.Tasks)
+	}
+	issue := rep.Tasks[0]
+	if issue.Ref != "#116" || len(issue.Branches) != 2 {
+		t.Fatalf("branches did not fold: %+v", issue)
+	}
+	if issue.Mins != 3 {
+		t.Fatalf("the shared minute is counted once: %d", issue.Mins)
+	}
+	if !strings.HasPrefix(issue.Label(), "#116 (2 branches)") {
+		t.Fatalf("label %q", issue.Label())
+	}
+}
+
+func TestSlackifyBoldsHeadings(t *testing.T) {
+	got := slackify("# WEEK 2026-W35\n\n## DAYS\nMon 24  5h\n")
+	if !strings.Contains(got, "*WEEK 2026-W35*") || !strings.Contains(got, "*DAYS*") {
+		t.Fatalf("headings not converted: %q", got)
+	}
+	if !strings.Contains(got, "Mon 24  5h") {
+		t.Fatalf("body lost: %q", got)
+	}
+}
+
+func TestWriteOutCreatesTheDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "weekly.md")
+	got, err := writeOut(path, "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(got)
+	if err != nil || string(data) != "hello" {
+		t.Fatalf("read back %q err %v", data, err)
+	}
+}
+
+func TestPostSlackRefusesWithoutAWebhook(t *testing.T) {
+	if err := postSlack("", "report"); err == nil {
+		t.Fatal("no webhook must be an error, not a silent no-op")
 	}
 }

@@ -50,8 +50,11 @@ timetop                     dashboard: three screens over the same minutes
 timetop weekly last         last week's report
 timetop weekly --md         markdown, ready to paste into a standup
 timetop tasks last          one line per branch: time, state, commits
-timetop daily yesterday     one day, session by session
+timetop daily yesterday     one day, session by session — projects, tasks, sessions
 timetop scan                all-time totals per project
+
+timetop weekly --out ~/standup.md      write the report to a file
+timetop weekly --slack                 post it to SLACK_WEBHOOK from the config
 ```
 
 ### Screens
@@ -82,7 +85,9 @@ weekly as markdown, `Y` copy the selected day, `r` rescan, `q` quit.
 - **Project** — the git remote name, so a worktree, a duty clone and the dev
   checkout of one repository report as one project.
 - **Task** — the branch recorded on each entry, so hours land on `feat-116`
-  even when the work happened in the main checkout. State comes from git:
+  even when the work happened in the main checkout. Branches that carry the
+  same issue fold into one task (`#116 (6 branches)`), with their minutes
+  unioned and their commits deduplicated. State comes from git:
   `merged`, `open`, `gone` (merged and deleted), `trunk`, `quiet` (no commits).
   A deleted branch is still asked for its commits by the issue it named.
 - **Unattended time** — sessions started by a script (`sdk-*` entrypoints,
@@ -96,6 +101,13 @@ weekly as markdown, `Y` copy the selected day, `r` rescan, `q` quit.
 
 The scan is cached in `~/.config/timetop/state/cache.json`, keyed by file size
 and mtime, so a rescan of an unchanged transcript costs nothing.
+
+## Sharing a report
+
+`--out PATH` writes the rendered report to a file (directories are created).
+`--slack` posts it to the incoming webhook in `SLACK_WEBHOOK`; both flags imply
+markdown. Nothing is ever posted unless you type `--slack` — the tool has no
+background publishing.
 
 ## Configuration
 
