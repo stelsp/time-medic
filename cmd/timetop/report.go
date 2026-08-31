@@ -33,15 +33,33 @@ type DayStat struct {
 	First   time.Time
 	Last    time.Time
 	Commits int
+	Tokens  Tokens
+}
+
+// TaskStat is one unit of work as the forge sees it: a branch, the time that
+// went into it, what it produced and whether it landed.
+type TaskStat struct {
+	Project string
+	Branch  string
+	Ref     string // issue reference, when the branch or its commits name one
+	Mins    int
+	Commits []Commit
+	Merged  bool
+	Gone    bool // the branch is no longer in the repo (merged and deleted)
+	Last    time.Time
 }
 
 type Report struct {
 	Period
 	TotalMins int // wall clock: minutes worked at all, overlaps counted once
+	AgentMins int // of those, minutes that only an unattended run was awake for
 	SumMins   int // sum over projects; larger than TotalMins when work overlaps
 	Days      []DayStat
 	Projects  []ProjStat
 	Sessions  []Session
+	Tasks     []TaskStat
+	Tokens    map[string]*Tokens // model -> tokens burned in the period
+	PrevMins  int                // wall clock of the period before this one
 	Gap       int
 	// CoverageFrom is the oldest minute any transcript can prove.
 	CoverageFrom time.Time
@@ -167,7 +185,92 @@ func Build(act *Activity, cfg Config, p Period) Report {
 
 	sort.Slice(rep.Projects, func(i, j int) bool { return rep.Projects[i].Mins > rep.Projects[j].Mins })
 	sort.Slice(rep.Sessions, func(i, j int) bool { return rep.Sessions[i].Start.Before(rep.Sessions[j].Start) })
+
+	for m := range act.Agent {
+		t := time.Unix(int64(m)*60, 0)
+		if !t.Before(p.From) && t.Before(p.To) && !act.Human[m] {
+			rep.AgentMins++
+		}
+	}
+
+	rep.Tokens = map[string]*Tokens{}
+	for i, d := range rep.Days {
+		for model, tk := range act.Tokens[d.Date.Format("2006-01-02")] {
+			if rep.Tokens[model] == nil {
+				rep.Tokens[model] = &Tokens{}
+			}
+			rep.Tokens[model].add(*tk)
+			rep.Days[i].Tokens.add(*tk)
+		}
+	}
+	rep.Tasks = buildTasks(act, cfg, p, author)
 	return rep
+}
+
+// buildTasks slices the same minutes by branch instead of by project, then
+// asks git what each branch produced and whether it landed.
+func buildTasks(act *Activity, cfg Config, p Period, author string) []TaskStat {
+	var out []TaskStat
+	for key, set := range act.Tasks {
+		proj, branch := splitTask(key)
+		mins, last := 0, time.Time{}
+		for m := range set {
+			t := time.Unix(int64(m)*60, 0)
+			if !t.Before(p.From) && t.Before(p.To) {
+				mins++
+				if t.After(last) {
+					last = t
+				}
+			}
+		}
+		if mins == 0 {
+			continue
+		}
+		ts := TaskStat{Project: proj, Branch: branch, Mins: mins, Last: last}
+		if root := act.Roots[proj]; root != "" && branch != "" {
+			a := author
+			if a == "" {
+				a = gitAuthor(root)
+			}
+			ts.Gone = !branchExists(root, branch)
+			ts.Commits = commitsOnBranch(root, branch, a, p.From, p.To)
+			ts.Merged = branchMerged(root, branch)
+		}
+		ts.Ref = taskRef(branch, ts.Commits)
+		out = append(out, ts)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Mins > out[j].Mins })
+	return out
+}
+
+// BuildWeekly is Build for a week, with the week before it measured too so a
+// report can say whether the pace went up or down.
+func BuildWeekly(act *Activity, cfg Config, anchor time.Time) Report {
+	rep := Build(act, cfg, Weekly(anchor))
+	prev := Build(act, cfg, Weekly(anchor.AddDate(0, 0, -7)))
+	rep.PrevMins = prev.TotalMins
+	return rep
+}
+
+// Punchcard buckets the last n weeks into weekday × hour so the shape of the
+// working day is visible: rows Monday..Sunday, columns 0..23.
+func Punchcard(act *Activity, from, to time.Time) [7][24]int {
+	var card [7][24]int
+	seen := map[minute]bool{}
+	for _, set := range act.Minutes {
+		for m := range set {
+			if seen[m] {
+				continue
+			}
+			seen[m] = true
+			t := time.Unix(int64(m)*60, 0)
+			if t.Before(from) || !t.Before(to) {
+				continue
+			}
+			card[(int(t.Weekday())+6)%7][t.Hour()]++
+		}
+	}
+	return card
 }
 
 func hm(mins int) string {
@@ -227,6 +330,15 @@ func RenderWeekly(rep Report, md bool) string {
 	if rep.SumMins > rep.TotalMins {
 		fmt.Fprintf(&b, "%s across projects (%s of it in parallel sessions)\n",
 			hm(rep.SumMins), hm(rep.SumMins-rep.TotalMins))
+	}
+	if rep.AgentMins > 0 {
+		fmt.Fprintf(&b, "%s of it unattended agent runs — no human at the keyboard\n", hm(rep.AgentMins))
+	}
+	if tokenLine := rep.TokenLine(); tokenLine != "" {
+		fmt.Fprintf(&b, "%s\n", tokenLine)
+	}
+	if d := rep.DeltaLine(); d != "" {
+		fmt.Fprintf(&b, "%s\n", d)
 	}
 	if note := rep.CoverageNote(); note != "" {
 		fmt.Fprintf(&b, "%s\n", note)
@@ -382,4 +494,131 @@ func (r Report) CoverageNote() string {
 		note += " (commits but no session log: " + strings.Join(untracked, ", ") + ")"
 	}
 	return note
+}
+
+// TokenLine summarises the AI cost of the period in the only unit that needs
+// no price list.
+func (r Report) TokenLine() string {
+	var total Tokens
+	models := make([]string, 0, len(r.Tokens))
+	for m, tk := range r.Tokens {
+		total.add(*tk)
+		models = append(models, m)
+	}
+	if total.Calls == 0 {
+		return ""
+	}
+	sort.Slice(models, func(i, j int) bool {
+		return r.Tokens[models[i]].Out > r.Tokens[models[j]].Out
+	})
+	parts := make([]string, 0, len(models))
+	for _, m := range models {
+		parts = append(parts, fmt.Sprintf("%s %s out", shortModel(m), compact(r.Tokens[m].Out)))
+	}
+	return fmt.Sprintf("%d AI calls · %s out · %s in · %s cache read · %s",
+		total.Calls, compact(total.Out), compact(total.In+total.CacheW),
+		compact(total.CacheR), strings.Join(parts, ", "))
+}
+
+// DeltaLine compares the period with the one before it.
+func (r Report) DeltaLine() string {
+	if r.PrevMins == 0 {
+		return ""
+	}
+	diff := r.TotalMins - r.PrevMins
+	sign := "+"
+	if diff < 0 {
+		sign = "−"
+		diff = -diff
+	}
+	return fmt.Sprintf("%s%s vs the week before (%s)", sign, hm(diff), hm(r.PrevMins))
+}
+
+// RenderTasks lists the period's work the way a standup asks for it: by task,
+// with its state and what it produced.
+func RenderTasks(rep Report, md bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%sTASKS %s · %s – %s\n\n", head(md, 1), rep.Label,
+		rep.From.Format("Mon Jan 2"), rep.To.AddDate(0, 0, -1).Format("Mon Jan 2"))
+	if len(rep.Tasks) == 0 {
+		fmt.Fprint(&b, "no tracked work\n")
+		return b.String()
+	}
+	top := rep.Tasks[0].Mins
+	fmt.Fprint(&b, pre(md))
+	for _, t := range rep.Tasks {
+		fmt.Fprintf(&b, "%-24s %-10s %8s  %-7s %3d commits  %s\n",
+			trunc(t.Label(), 24), bar(t.Mins, top, 10), hm(t.Mins), t.State(),
+			len(t.Commits), trunc(t.Project, 18))
+	}
+	fmt.Fprint(&b, post(md)+"\n")
+
+	for _, t := range rep.Tasks {
+		if len(t.Commits) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "%s%s — %s, %d commits\n%s", head(md, 2), t.Label(), t.State(), len(t.Commits), pre(md))
+		shown := t.Commits
+		if weeklyCommitLimit > 0 && len(shown) > weeklyCommitLimit {
+			shown = shown[:weeklyCommitLimit]
+		}
+		for _, c := range shown {
+			fmt.Fprintf(&b, "%s  %s  %s\n", c.When.Format("Mon 02 15:04"), c.SHA, trunc(c.Subject, 74))
+		}
+		if n := len(t.Commits) - len(shown); n > 0 {
+			fmt.Fprintf(&b, "… +%d more (--full)\n", n)
+		}
+		fmt.Fprint(&b, post(md)+"\n")
+	}
+	return b.String()
+}
+
+// Label is the task as a human names it: the issue reference when there is
+// one, otherwise the branch.
+func (t TaskStat) Label() string {
+	switch {
+	case t.Branch == "":
+		return "(no branch)"
+	case t.Ref != "" && !strings.Contains(t.Branch, strings.TrimPrefix(t.Ref, "#")):
+		return t.Branch + " " + t.Ref
+	default:
+		return t.Branch
+	}
+}
+
+// State is where the task stands on the integration branch.
+func (t TaskStat) State() string {
+	switch {
+	case t.Branch == "":
+		return "—"
+	case isTrunk(t.Branch):
+		return "trunk"
+	case t.Gone:
+		return "gone"
+	case t.Merged:
+		return "merged"
+	case len(t.Commits) > 0:
+		return "open"
+	default:
+		return "quiet"
+	}
+}
+
+func shortModel(m string) string {
+	m = strings.TrimPrefix(m, "claude-")
+	if i := strings.Index(m, "-2"); i > 0 { // strip date suffixes like -20251001
+		m = m[:i]
+	}
+	return m
+}
+
+// compact renders big counts as 1.2M / 340k so a header line stays a line.
+func compact(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%.0fk", float64(n)/1e3)
+	}
+	return fmt.Sprintf("%d", n)
 }

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -73,7 +74,11 @@ func LoadConfig() Config {
 	return cfg
 }
 
-func (c Config) CachePath() string { return filepath.Join(c.StateDir, "cache.json") }
+// CachePath is version-stamped: two binaries with different derived shapes
+// never read each other's cache, they just rescan.
+func (c Config) CachePath() string {
+	return filepath.Join(c.StateDir, fmt.Sprintf("cache-v%d.json", cacheVersion))
+}
 
 func expand(p, home string) string {
 	if strings.HasPrefix(p, "~/") {

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -65,4 +66,77 @@ func gauge(mins int, targetHours float64, width int) string {
 		filled = amber
 	}
 	return filled.Render(strings.Repeat("█", n)) + dim.Render(strings.Repeat("░", width-n))
+}
+
+// barC is bar() with the console's one accent: amber for what happened, a
+// quiet rail for what did not.
+func barC(mins, maxV, width int) string {
+	b := bar(mins, maxV, width)
+	filled := strings.Count(b, "█")
+	return amber.Render(strings.Repeat("█", filled)) + dim.Render(strings.Repeat("░", width-filled))
+}
+
+// heat paints one punchcard cell: density in four steps, not a color ramp.
+func heat(v, peak int) string {
+	if v == 0 {
+		return dim.Render("·")
+	}
+	steps := []string{"░", "▒", "▓", "█"}
+	i := 0
+	if peak > 0 {
+		i = min(v*len(steps)/peak, len(steps)-1)
+	}
+	if i >= 3 {
+		return amberB.Render(steps[i])
+	}
+	return amber.Render(steps[i])
+}
+
+// vbar is one column of an hour histogram, drawn in an eighth-block scale.
+func vbar(v, peak int) string {
+	if v == 0 {
+		return dim.Render("·")
+	}
+	blocks := []string{"▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
+	i := 0
+	if peak > 0 {
+		i = min(v*len(blocks)/peak, len(blocks)-1)
+	}
+	return amber.Render(blocks[i])
+}
+
+// stateStyled colors a task's standing: landed, in flight, or historical.
+func stateStyled(state string) string {
+	switch state {
+	case "merged":
+		return green.Render(fmt.Sprintf("%-7s", state))
+	case "open":
+		return amber.Render(fmt.Sprintf("%-7s", state))
+	case "gone", "trunk", "quiet", "—":
+		return dim.Render(fmt.Sprintf("%-7s", state))
+	}
+	return fmt.Sprintf("%-7s", state)
+}
+
+// titleStyled colors the conventional-commit type prefix of a subject: feat
+// green, fix amber, everything procedural dim.
+func titleStyled(s string) string {
+	i := strings.Index(s, ":")
+	if i <= 0 || i > 20 {
+		return s
+	}
+	kind, rest := s[:i], s[i:]
+	base := kind
+	if j := strings.IndexByte(kind, '('); j > 0 {
+		base = kind[:j]
+	}
+	switch base {
+	case "feat":
+		return green.Render(kind) + rest
+	case "fix", "perf":
+		return amber.Render(kind) + rest
+	case "docs", "chore", "test", "ci", "refactor", "polish", "style":
+		return dim.Render(kind) + rest
+	}
+	return s
 }

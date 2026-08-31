@@ -17,6 +17,7 @@ const usage = `timetop — autonomous time tracking from your work trail
   timetop                    dashboard (TUI)
   timetop daily [when]       when: today (default) | yesterday | YYYY-MM-DD
   timetop weekly [when]      when: this (default) | last | YYYY-MM-DD | -N weeks
+  timetop tasks [when]       one line per branch: time, state, commits
   timetop scan               refresh the cache and print what was found
 
   --md                       markdown output, ready to paste
@@ -66,7 +67,10 @@ func main() {
 		fmt.Print(RenderDaily(Build(act, cfg, Daily(parseDay(when))), md))
 	case "weekly", "week", "w":
 		act := mustScan(cfg)
-		fmt.Print(RenderWeekly(Build(act, cfg, Weekly(parseWeek(when))), md))
+		fmt.Print(RenderWeekly(BuildWeekly(act, cfg, parseWeek(when)), md))
+	case "tasks", "t":
+		act := mustScan(cfg)
+		fmt.Print(RenderTasks(Build(act, cfg, Weekly(parseWeek(when))), md))
 	case "scan":
 		act := mustScan(cfg)
 		total := 0

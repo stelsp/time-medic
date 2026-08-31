@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -104,5 +105,102 @@ func TestJSONFieldCutsValueWithoutParsing(t *testing.T) {
 	}
 	if got := jsonField(line, "missing"); got != "" {
 		t.Fatalf("absent field: %q", got)
+	}
+}
+
+func TestUsageOfTakesMessageLevelCountsOnce(t *testing.T) {
+	// the iterations array repeats the same tokens; only the first copy counts
+	line := []byte(`{"type":"assistant","message":{"model":"claude-opus-5","usage":` +
+		`{"input_tokens":2,"cache_creation_input_tokens":400,"cache_read_input_tokens":536013,` +
+		`"output_tokens":928,"iterations":[{"input_tokens":2,"output_tokens":928}]}}}`)
+	tk, model, ok := usageOf(line)
+	if !ok || model != "claude-opus-5" {
+		t.Fatalf("model %q ok %v", model, ok)
+	}
+	if tk.In != 2 || tk.Out != 928 || tk.CacheR != 536013 || tk.CacheW != 400 || tk.Calls != 1 {
+		t.Fatalf("counts: %+v", tk)
+	}
+	if _, _, ok := usageOf([]byte(`{"type":"user"}`)); ok {
+		t.Fatal("a line without usage is not an AI call")
+	}
+}
+
+func TestUnattendedSplitsRobotsFromPeople(t *testing.T) {
+	if !unattended("sdk-cli") || !unattended("sdk-py") {
+		t.Fatal("sdk entrypoints are unattended")
+	}
+	if unattended("cli") || unattended("claude-desktop") {
+		t.Fatal("interactive entrypoints are not")
+	}
+}
+
+func TestTaskKeyRoundTrip(t *testing.T) {
+	proj, branch := splitTask(taskKey("ai-viewer-proto", "feat-116-s2"))
+	if proj != "ai-viewer-proto" || branch != "feat-116-s2" {
+		t.Fatalf("got %q %q", proj, branch)
+	}
+	if p, b := splitTask(taskKey("misc", "")); p != "misc" || b != "" {
+		t.Fatalf("empty branch survives: %q %q", p, b)
+	}
+}
+
+func TestTaskLabelAndState(t *testing.T) {
+	ts := TaskStat{Branch: "hotspot-ai", Ref: "#83", Commits: []Commit{{}}}
+	if ts.Label() != "hotspot-ai #83" {
+		t.Fatalf("label %q", ts.Label())
+	}
+	if ts.State() != "open" {
+		t.Fatalf("state %q", ts.State())
+	}
+	if (TaskStat{Branch: "feat-116-s2", Ref: "#116"}).Label() != "feat-116-s2" {
+		t.Fatal("a branch that already names the issue is not repeated")
+	}
+	if (TaskStat{Branch: "main"}).State() != "trunk" {
+		t.Fatal("trunk work is not a task")
+	}
+	if (TaskStat{Branch: "old", Gone: true}).State() != "gone" {
+		t.Fatal("a deleted branch reads as gone")
+	}
+}
+
+func TestTaskRefPrefersBranchThenSubject(t *testing.T) {
+	if got := taskRef("feat-116-s2", nil); got != "#116" {
+		t.Fatalf("branch ref: %q", got)
+	}
+	if got := taskRef("hotspot-ai", []Commit{{Subject: "feat(mrtop): hotspots (#83)"}}); got != "#83" {
+		t.Fatalf("subject ref: %q", got)
+	}
+	if got := taskRef("main", []Commit{{Subject: "fix: thing (#12)"}}); got != "" {
+		t.Fatalf("trunk carries no task: %q", got)
+	}
+}
+
+func TestPunchcardBucketsByWeekdayAndHour(t *testing.T) {
+	when := time.Date(2026, 8, 26, 14, 30, 0, 0, time.Local) // a Wednesday
+	m := minute(when.Unix() / 60)
+	act := &Activity{Minutes: map[string]map[minute]bool{"a": {m: true, m + 1: true}}}
+	card := Punchcard(act, when.AddDate(0, 0, -1), when.AddDate(0, 0, 1))
+	if card[2][14] != 2 {
+		t.Fatalf("Wednesday 14:00 should hold 2 minutes, got %d", card[2][14])
+	}
+}
+
+func TestWindowMarksWhatIsCut(t *testing.T) {
+	lines := []string{"a", "b", "c", "d", "e"}
+	got := window(lines, 0, 3)
+	if !strings.Contains(got, "2 more below") || strings.Contains(got, "above") {
+		t.Fatalf("top of list: %q", got)
+	}
+	if got := window(lines, 2, 3); !strings.Contains(got, "more above") {
+		t.Fatalf("scrolled: %q", got)
+	}
+	if got := window(lines[:2], 0, 5); got != "a\nb" {
+		t.Fatalf("short list is untouched: %q", got)
+	}
+}
+
+func TestCompactKeepsHeadersOnOneLine(t *testing.T) {
+	if compact(950) != "950" || compact(12_400) != "12k" || compact(1_572_000_000) != "1572.0M" {
+		t.Fatalf("%s %s %s", compact(950), compact(12_400), compact(1_572_000_000))
 	}
 }

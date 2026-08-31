@@ -46,12 +46,24 @@ make install        # builds bin/timetop and copies it to ~/.local/bin
 ## Use
 
 ```
-timetop                     dashboard: this week, the selected day in detail
+timetop                     dashboard: three screens over the same minutes
 timetop weekly last         last week's report
 timetop weekly --md         markdown, ready to paste into a standup
+timetop tasks last          one line per branch: time, state, commits
 timetop daily yesterday     one day, session by session
 timetop scan                all-time totals per project
 ```
+
+### Screens
+
+| key | screen | what it answers |
+|-----|--------|-----------------|
+| `1` | WEEK | how long, which days, which projects, what shipped |
+| `2` | TASKS | which branch each hour went into, whether it landed |
+| `3` | RHYTHM | when you actually work — weekday × hour over 8 weeks |
+
+The header carries a live marker while a session is running (`● project 35m`),
+the weekly gauge against your target, and the tab bar.
 
 Selectors: `today` / `yesterday` / `YYYY-MM-DD` / `-N` for days, and
 `this` / `last` / `YYYY-MM-DD` / `-N` for weeks.
@@ -69,6 +81,15 @@ weekly as markdown, `Y` copy the selected day, `r` rescan, `q` quit.
   shown as parallel work.
 - **Project** — the git remote name, so a worktree, a duty clone and the dev
   checkout of one repository report as one project.
+- **Task** — the branch recorded on each entry, so hours land on `feat-116`
+  even when the work happened in the main checkout. State comes from git:
+  `merged`, `open`, `gone` (merged and deleted), `trunk`, `quiet` (no commits).
+  A deleted branch is still asked for its commits by the issue it named.
+- **Unattended time** — sessions started by a script (`sdk-*` entrypoints,
+  e.g. a bot calling `claude -p`) are counted and reported separately, so your
+  robots' hours never pass as yours.
+- **Tokens** — read off the same transcripts per model and per day: calls,
+  output, input, cache reads. No price list, no invented dollars.
 - **Coverage** — reports say when the oldest transcript starts. Days before
   that are unmeasured, not idle, and days with commits but no session log are
   named explicitly.

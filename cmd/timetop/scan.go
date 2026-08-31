@@ -1,6 +1,7 @@
 // Autonomous activity capture: Claude Code session transcripts are the clock.
 // Every timestamped entry in ~/.claude/projects/**/*.jsonl is a proof of work
-// at a known cwd; minutes between two nearby entries count as worked minutes.
+// at a known cwd and branch; minutes between two nearby entries count as
+// worked minutes. Token counts ride along from the same lines.
 package main
 
 import (
@@ -10,19 +11,60 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// minute index = unix seconds / 60, in UTC; rendering converts to local time.
+// cacheVersion invalidates every cached transcript when the derived shape
+// changes — cheaper than migrating, and a full rescan is under a second.
+const cacheVersion = 3
+
+// minute index = unix seconds / 60; rendering converts to local time.
 type minute int64
 
-// Activity is the union of every source: worked minutes per project plus the
-// artifacts (commits) that landed inside them.
+// taskKey pairs a project with the branch it was worked on. The separator is
+// a unit separator so it can never collide with a branch name.
+const taskSep = "\x1f"
+
+func taskKey(proj, branch string) string { return proj + taskSep + branch }
+
+func splitTask(key string) (proj, branch string) {
+	proj, branch, _ = strings.Cut(key, taskSep)
+	return proj, branch
+}
+
+// Tokens is what an AI call cost in units nobody has to price: raw counts.
+type Tokens struct {
+	In     int64 `json:"i"`
+	Out    int64 `json:"o"`
+	CacheR int64 `json:"r"`
+	CacheW int64 `json:"w"`
+	Calls  int64 `json:"n"`
+}
+
+func (t *Tokens) add(o Tokens) {
+	t.In += o.In
+	t.Out += o.Out
+	t.CacheR += o.CacheR
+	t.CacheW += o.CacheW
+	t.Calls += o.Calls
+}
+
+// Total is every token the model actually read or wrote.
+func (t Tokens) Total() int64 { return t.In + t.Out + t.CacheR + t.CacheW }
+
+// Activity is the union of every source: worked minutes per project and per
+// task, the tokens burned, and the checkouts to ask about commits.
 type Activity struct {
 	Minutes map[string]map[minute]bool // project -> active minutes
-	Roots   map[string]string          // project -> a real checkout path
-	Commits map[string][]Commit        // project -> commits (filled on demand)
+	Tasks   map[string]map[minute]bool // project\x1fbranch -> active minutes
+	// Agent holds the minutes that came from unattended runs (a bot calling
+	// claude -p), so a report can separate your hours from your robots'.
+	Agent  map[minute]bool
+	Human  map[minute]bool
+	Roots  map[string]string // project -> a real checkout path
+	Tokens map[string]map[string]*Tokens
 	// First is the oldest minute on record: nothing before it can be reported.
 	First time.Time
 }
@@ -37,11 +79,15 @@ type Commit struct {
 // fileCache is what we remember about one transcript so a rescan of an
 // unchanged file costs nothing.
 type fileCache struct {
-	Size    int64              `json:"size"`
-	ModTime int64              `json:"mtime"`
-	Gap     int                `json:"gap"`
-	Minutes map[string][]int64 `json:"minutes"` // project -> minute indices
-	Roots   map[string]string  `json:"roots"`
+	V       int                          `json:"v"`
+	Size    int64                        `json:"size"`
+	ModTime int64                        `json:"mtime"`
+	Gap     int                          `json:"gap"`
+	Minutes map[string][]int64           `json:"minutes"` // task key -> minutes
+	Agent   []int64                      `json:"agent"`   // unattended minutes
+	Human   []int64                      `json:"human"`
+	Roots   map[string]string            `json:"roots"`
+	Tokens  map[string]map[string]Tokens `json:"tokens"` // day -> model -> counts
 }
 
 type scanCache struct {
@@ -53,8 +99,11 @@ func Scan(cfg Config) (*Activity, error) {
 	cache := loadCache(cfg.CachePath())
 	act := &Activity{
 		Minutes: map[string]map[minute]bool{},
+		Tasks:   map[string]map[minute]bool{},
+		Agent:   map[minute]bool{},
+		Human:   map[minute]bool{},
 		Roots:   map[string]string{},
-		Commits: map[string][]Commit{},
+		Tokens:  map[string]map[string]*Tokens{},
 	}
 	dirty := false
 	err := filepath.WalkDir(cfg.TranscriptDir, func(path string, d os.DirEntry, err error) error {
@@ -66,24 +115,37 @@ func Scan(cfg Config) (*Activity, error) {
 			return nil
 		}
 		fc := cache.Files[path]
-		if fc == nil || fc.Size != st.Size() || fc.ModTime != st.ModTime().Unix() || fc.Gap != cfg.GapMinutes {
+		if fc == nil || fc.V != cacheVersion || fc.Size != st.Size() ||
+			fc.ModTime != st.ModTime().Unix() || fc.Gap != cfg.GapMinutes {
 			fc = scanFile(path, cfg)
 			cache.Files[path] = fc
 			dirty = true
 		}
-		for proj, mins := range fc.Minutes {
-			set := act.Minutes[proj]
-			if set == nil {
-				set = map[minute]bool{}
-				act.Minutes[proj] = set
-			}
-			for _, m := range mins {
-				set[minute(m)] = true
-			}
+		for key, mins := range fc.Minutes {
+			proj, _ := splitTask(key)
+			addMinutes(act.Tasks, key, mins)
+			addMinutes(act.Minutes, proj, mins)
+		}
+		for _, m := range fc.Agent {
+			act.Agent[minute(m)] = true
+		}
+		for _, m := range fc.Human {
+			act.Human[minute(m)] = true
 		}
 		for proj, root := range fc.Roots {
 			if _, ok := act.Roots[proj]; !ok {
 				act.Roots[proj] = root
+			}
+		}
+		for day, byModel := range fc.Tokens {
+			if act.Tokens[day] == nil {
+				act.Tokens[day] = map[string]*Tokens{}
+			}
+			for model, tk := range byModel {
+				if act.Tokens[day][model] == nil {
+					act.Tokens[day][model] = &Tokens{}
+				}
+				act.Tokens[day][model].add(tk)
 			}
 		}
 		return nil
@@ -105,11 +167,27 @@ func Scan(cfg Config) (*Activity, error) {
 	return act, nil
 }
 
-// scanFile turns one transcript into gap-filled minutes per project. Lines are
-// read raw and the two fields we need are cut out by hand: a transcript line
+func addMinutes(dst map[string]map[minute]bool, key string, mins []int64) {
+	set := dst[key]
+	if set == nil {
+		set = map[minute]bool{}
+		dst[key] = set
+	}
+	for _, m := range mins {
+		set[minute(m)] = true
+	}
+}
+
+// scanFile turns one transcript into gap-filled minutes per task. Lines are
+// read raw and only the fields we need are cut out by hand: a transcript line
 // can be megabytes of tool output, and JSON-decoding all of it is 20x slower.
 func scanFile(path string, cfg Config) *fileCache {
-	fc := &fileCache{Gap: cfg.GapMinutes, Minutes: map[string][]int64{}, Roots: map[string]string{}}
+	fc := &fileCache{
+		V: cacheVersion, Gap: cfg.GapMinutes,
+		Minutes: map[string][]int64{},
+		Roots:   map[string]string{},
+		Tokens:  map[string]map[string]Tokens{},
+	}
 	st, err := os.Stat(path)
 	if err != nil {
 		return fc
@@ -122,11 +200,8 @@ func scanFile(path string, cfg Config) *fileCache {
 	}
 	defer f.Close()
 
-	type ev struct {
-		t    int64
-		proj string
-	}
-	var evs []ev
+	byTask := map[string][]int64{}
+	var agent, human []int64
 	r := bufio.NewReaderSize(f, 1<<20)
 	for {
 		line, err := readLine(r)
@@ -136,9 +211,24 @@ func scanFile(path string, cfg Config) *fileCache {
 			if ts != "" && cwd != "" {
 				if t, e := time.Parse(time.RFC3339, ts); e == nil {
 					proj, root := projectOf(cwd, cfg)
-					evs = append(evs, ev{t.Unix() / 60, proj})
+					key := taskKey(proj, jsonField(line, "gitBranch"))
+					byTask[key] = append(byTask[key], t.Unix()/60)
+					if unattended(jsonField(line, "entrypoint")) {
+						agent = append(agent, t.Unix()/60)
+					} else {
+						human = append(human, t.Unix()/60)
+					}
 					if _, ok := fc.Roots[proj]; !ok {
 						fc.Roots[proj] = root
+					}
+					if tk, model, ok := usageOf(line); ok {
+						day := t.Local().Format("2006-01-02")
+						if fc.Tokens[day] == nil {
+							fc.Tokens[day] = map[string]Tokens{}
+						}
+						cur := fc.Tokens[day][model]
+						cur.add(tk)
+						fc.Tokens[day][model] = cur
 					}
 				}
 			}
@@ -147,15 +237,44 @@ func scanFile(path string, cfg Config) *fileCache {
 			break
 		}
 	}
-	byProj := map[string][]int64{}
-	for _, e := range evs {
-		byProj[e.proj] = append(byProj[e.proj], e.t)
-	}
-	for proj, ts := range byProj {
+	for key, ts := range byTask {
 		sort.Slice(ts, func(i, j int) bool { return ts[i] < ts[j] })
-		fc.Minutes[proj] = fillGaps(ts, int64(cfg.GapMinutes))
+		fc.Minutes[key] = fillGaps(ts, int64(cfg.GapMinutes))
 	}
+	sort.Slice(agent, func(i, j int) bool { return agent[i] < agent[j] })
+	sort.Slice(human, func(i, j int) bool { return human[i] < human[j] })
+	fc.Agent = fillGaps(agent, int64(cfg.GapMinutes))
+	fc.Human = fillGaps(human, int64(cfg.GapMinutes))
 	return fc
+}
+
+// unattended tells a robot's session from yours: the SDK entrypoints are what
+// a script gets when it shells out to claude -p.
+func unattended(entrypoint string) bool {
+	return strings.HasPrefix(entrypoint, "sdk-")
+}
+
+// usageOf reads the token counts off an assistant line. The first occurrence
+// of each key is the message-level usage; the per-iteration copies that follow
+// are the same tokens counted again.
+func usageOf(line []byte) (Tokens, string, bool) {
+	i := strings.Index(string(line), `"usage":{`)
+	if i < 0 {
+		return Tokens{}, "", false
+	}
+	rest := line[i:]
+	tk := Tokens{
+		In:     jsonNum(rest, "input_tokens"),
+		Out:    jsonNum(rest, "output_tokens"),
+		CacheR: jsonNum(rest, "cache_read_input_tokens"),
+		CacheW: jsonNum(rest, "cache_creation_input_tokens"),
+		Calls:  1,
+	}
+	model := jsonField(line, "model")
+	if model == "" {
+		model = "unknown"
+	}
+	return tk, model, true
 }
 
 // fillGaps marks every minute between two events that sit within the idle gap,
@@ -206,6 +325,22 @@ func jsonField(line []byte, key string) string {
 	return rest[:j]
 }
 
+// jsonNum is jsonField for unquoted numbers.
+func jsonNum(line []byte, key string) int64 {
+	k := `"` + key + `":`
+	i := strings.Index(string(line), k)
+	if i < 0 {
+		return 0
+	}
+	rest := string(line[i+len(k):])
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	n, _ := strconv.ParseInt(rest[:end], 10, 64)
+	return n
+}
+
 // projectOf names the unit of work behind a cwd: worktrees, duty clones and
 // subdirectories of one repo all report as the same project, so a week's time
 // lands on "ai-viewer-proto", not on twelve feature branches.
@@ -229,15 +364,11 @@ func projectOf(cwd string, cfg Config) (name, root string) {
 		if rn := gitRemoteName(top); rn != "" {
 			name = rn
 		}
-	} else {
-		name = "misc"
+	} else if home, err := os.UserHomeDir(); err == nil && filepath.Clean(cwd) == filepath.Clean(home) {
+		name = "misc" // a session started from $HOME belongs to no project
 	}
+	// a deleted worktree leaves no repo to ask, so the directory name stands
 	name = strings.TrimPrefix(name, ".")
-	for _, suf := range []string{"-repo", "-gh"} {
-		if trimmed := strings.TrimSuffix(name, suf); trimmed != "" && trimmed != name {
-			name = trimmed
-		}
-	}
 	if alias, ok := cfg.Aliases[name]; ok {
 		name = alias
 	}
@@ -254,8 +385,7 @@ func gitRemoteName(root string) string {
 	}
 	name := ""
 	if out, err := exec.Command("git", "-C", root, "remote", "get-url", "origin").Output(); err == nil {
-		url := strings.TrimSpace(string(out))
-		url = strings.TrimSuffix(url, ".git")
+		url := strings.TrimSuffix(strings.TrimSpace(string(out)), ".git")
 		if i := strings.LastIndexAny(url, "/:"); i >= 0 {
 			name = url[i+1:]
 		}
