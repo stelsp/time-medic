@@ -204,9 +204,13 @@ func (m model) header() string {
 			tb.WriteString(dim.Render(" " + t + " "))
 		}
 	}
+	spend := ""
+	if m.rep.CostTotal > 0 {
+		spend = "  " + green.Render(money(m.rep.CostTotal))
+	}
 	left := amberB.Render(" ✦ time-medic ") + dim.Render(m.rep.Label+"  ") +
 		bold.Render(hm(m.rep.TotalMins)) + " " + gauge(m.rep.TotalMins, m.cfg.TargetHours, 12) +
-		dim.Render(fmt.Sprintf(" of %.0fh", m.cfg.TargetHours)) + "  " + tb.String()
+		dim.Render(fmt.Sprintf(" of %.0fh", m.cfg.TargetHours)) + spend + "  " + tb.String()
 	right := m.nowMark()
 	pad := m.w - lipgloss.Width(left) - lipgloss.Width(right) - 1
 	if pad < 1 {
@@ -273,6 +277,9 @@ func (m model) weekScreen() string {
 	meta := hm(d.Mins)
 	if d.Tokens.Calls > 0 {
 		meta += fmt.Sprintf(" · %d calls · %s out", d.Tokens.Calls, compact(d.Tokens.Out))
+	}
+	if d.Cost > 0 {
+		meta += " · " + money(d.Cost)
 	}
 	detail := titledBox(m.w, "DAY "+d.Date.Format("Mon 02 Jan"), meta,
 		m.dayBody(detailH-1), detailH, m.focus == focusDay)
@@ -500,6 +507,9 @@ func (m model) rhythmScreen() string {
 		hm(dayTotal[argmax(dayTotal[:])]), peakHour, hm(perWeek))
 	if m.act != nil && len(m.act.Tokens) > 0 {
 		fmt.Fprintf(&b, " %s\n", m.rep.TokenLine())
+	}
+	if spend := m.rep.SpendLine(); spend != "" {
+		fmt.Fprintf(&b, " %s\n", spend)
 	}
 	h := m.h - 4
 	return titledBox(m.w, "RHYTHM", fmt.Sprintf("%s – %s", from.Format("Jan 2"), to.AddDate(0, 0, -1).Format("Jan 2")),

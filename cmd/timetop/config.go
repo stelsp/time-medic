@@ -17,6 +17,8 @@ type Config struct {
 	Author        string            // git author filter (email or name)
 	Aliases       map[string]string // raw project name -> reporting name
 	SlackWebhook  string            // incoming webhook, used only with --slack
+	Prices        string            // inline price table, dollars per Mtok
+	PricesFile    string            // path to a JSON price table (LiteLLM shape works)
 	StateDir      string
 }
 
@@ -66,6 +68,10 @@ func LoadConfig() Config {
 			cfg.Author = val
 		case "SLACK_WEBHOOK":
 			cfg.SlackWebhook = val
+		case "PRICES":
+			cfg.Prices = val
+		case "PRICES_FILE":
+			cfg.PricesFile = val
 		case "ALIASES": // "raw:name,raw2:name2"
 			for _, pair := range strings.Split(val, ",") {
 				if from, to, ok := strings.Cut(strings.TrimSpace(pair), ":"); ok {

@@ -52,6 +52,8 @@ timetop weekly --md         markdown, ready to paste into a standup
 timetop tasks last          one line per branch: time, state, commits
 timetop daily yesterday     one day, session by session — projects, tasks, sessions
 timetop scan                all-time totals per project
+timetop prices              the price table, read out of the claude CLI itself
+timetop prices --check      replay sessions and compare with Claude's own totals
 
 timetop weekly --out ~/standup.md      write the report to a file
 timetop weekly --slack                 post it to SLACK_WEBHOOK from the config
@@ -94,7 +96,16 @@ weekly as markdown, `Y` copy the selected day, `r` rescan, `q` quit.
   e.g. a bot calling `claude -p`) are counted and reported separately, so your
   robots' hours never pass as yours.
 - **Tokens** — read off the same transcripts per model and per day: calls,
-  output, input, cache reads. No price list, no invented dollars.
+  output, input, cache reads. Streamed rows of one API call are folded back
+  together by `requestId`, so nothing is counted twice.
+- **Dollars** — priced with the catalog the installed `claude` CLI carries
+  inside itself: the same tiers it bills you with, including the 1h vs 5m
+  cache-write split, the US-inference surcharge and fast-mode rates. Upgrade
+  the CLI and the prices follow. Nothing is hardcoded, nothing is fetched.
+  `timetop prices --check` replays the sessions where Claude Code recorded its
+  own total and prints the drift (about −4% here, from rows whose model this
+  tool cannot identify). A model missing from the table is reported as
+  unpriced, never as free.
 - **Coverage** — reports say when the oldest transcript starts. Days before
   that are unmeasured, not idle, and days with commits but no session log are
   named explicitly.

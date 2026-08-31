@@ -6,6 +6,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +21,8 @@ const usage = `timetop — autonomous time tracking from your work trail
   timetop weekly [when]      when: this (default) | last | YYYY-MM-DD | -N weeks
   timetop tasks [when]       one line per branch: time, state, commits
   timetop scan               refresh the cache and print what was found
+  timetop prices             show the price table (from the claude CLI's own catalog)
+  timetop prices --check     replay sessions and compare with Claude's own totals
 
   --md                       markdown output, ready to paste
   --full                     every commit, not just the first ten per project
@@ -86,6 +90,46 @@ func main() {
 	case "tasks", "t":
 		act := mustScan(cfg)
 		deliver(cfg, RenderTasks(Build(act, cfg, Weekly(parseWeek(when))), md || slack), out, slack)
+	case "prices":
+		pt := LoadPrices(cfg)
+		if when == "--check" || when == "check" {
+			if !pt.Known() {
+				fmt.Fprintln(os.Stderr, "no price table configured — nothing to check")
+				os.Exit(1)
+			}
+			fmt.Printf("checking %s against Claude Code's own cost records\n\n", pt.Source)
+			fmt.Print(RenderCheck(CheckPrices(cfg, pt)))
+			return
+		}
+		if !pt.Known() {
+			fmt.Printf("no price table configured — reports show tokens, no dollars\n\n"+
+				"point at one in %s:\n"+
+				"  PRICES_FILE=~/model_prices.json   # LiteLLM-shaped, $ per token\n"+
+				"  PRICES=claude-opus-5:15/75/1.5/18.75   # $ per Mtok: in/out/cache-read/cache-write\n",
+				filepath.Join(configDir(), "config.env"))
+			return
+		}
+		fmt.Printf("prices from %s\n\n", pt.Source)
+		act := mustScan(cfg)
+		seen := map[string]bool{}
+		for _, byBucket := range act.Tokens {
+			for bucket := range byBucket {
+				seen[ModelOf(bucket)] = true
+			}
+		}
+		for _, id := range pt.Models() {
+			fmt.Printf("  %-28s %s\n", id, priceLine(pt, id))
+		}
+		var missing []string
+		for model := range seen {
+			if _, ok := pt.Cost(model, Tokens{}); !ok && model != "<synthetic>" {
+				missing = append(missing, model)
+			}
+		}
+		sort.Strings(missing)
+		if len(missing) > 0 {
+			fmt.Printf("\nseen in your transcripts but unpriced: %s\n", strings.Join(missing, ", "))
+		}
 	case "scan":
 		act := mustScan(cfg)
 		total := 0
@@ -189,4 +233,15 @@ func deliver(cfg Config, report, out string, slack bool) {
 	if !printed {
 		fmt.Print(report)
 	}
+}
+
+// priceLine renders one model's prices in the unit price lists use.
+func priceLine(pt PriceTable, model string) string {
+	mtok := Tokens{In: 1_000_000}
+	in, _ := pt.Cost(model, mtok)
+	out, _ := pt.Cost(model, Tokens{Out: 1_000_000})
+	cr, _ := pt.Cost(model, Tokens{CacheR: 1_000_000})
+	cw, _ := pt.Cost(model, Tokens{CacheW: 1_000_000})
+	return fmt.Sprintf("in %s · out %s · cache read %s · cache write %s per Mtok",
+		money(in), money(out), money(cr), money(cw))
 }

@@ -34,6 +34,7 @@ type DayStat struct {
 	Last    time.Time
 	Commits int
 	Tokens  Tokens
+	Cost    float64
 }
 
 // TaskStat is one unit of work as the forge sees it: a branch, the time that
@@ -60,7 +61,11 @@ type Report struct {
 	Sessions  []Session
 	Tasks     []TaskStat
 	Tokens    map[string]*Tokens // model -> tokens burned in the period
-	PrevMins  int                // wall clock of the period before this one
+	Prices    PriceTable         // whatever price list the config points at
+	Cost      map[string]float64 // model -> dollars, only for priced models
+	CostTotal float64
+	Unpriced  []string // models seen but absent from the price table
+	PrevMins  int      // wall clock of the period before this one
 	Gap       int
 	// CoverageFrom is the oldest minute any transcript can prove.
 	CoverageFrom time.Time
@@ -195,15 +200,30 @@ func Build(act *Activity, cfg Config, p Period) Report {
 	}
 
 	rep.Tokens = map[string]*Tokens{}
+	rep.Prices = prices(cfg)
+	rep.Cost = map[string]float64{}
+	unpriced := map[string]bool{}
 	for i, d := range rep.Days {
-		for model, tk := range act.Tokens[d.Date.Format("2006-01-02")] {
-			if rep.Tokens[model] == nil {
-				rep.Tokens[model] = &Tokens{}
+		for bucket, tk := range act.Tokens[d.Date.Format("2006-01-02")] {
+			if rep.Tokens[bucket] == nil {
+				rep.Tokens[bucket] = &Tokens{}
 			}
-			rep.Tokens[model].add(*tk)
+			rep.Tokens[bucket].add(*tk)
 			rep.Days[i].Tokens.add(*tk)
+			model := ModelOf(bucket)
+			if c, ok := rep.Prices.Cost(bucket, *tk); ok {
+				rep.Cost[model] += c
+				rep.CostTotal += c
+				rep.Days[i].Cost += c
+			} else if tk.Total() > 0 && model != "<synthetic>" {
+				unpriced[model] = true
+			}
 		}
 	}
+	for model := range unpriced {
+		rep.Unpriced = append(rep.Unpriced, model)
+	}
+	sort.Strings(rep.Unpriced)
 	rep.Tasks = buildTasks(act, cfg, p, author)
 	return rep
 }
@@ -389,6 +409,9 @@ func RenderWeekly(rep Report, md bool) string {
 	if tokenLine := rep.TokenLine(); tokenLine != "" {
 		fmt.Fprintf(&b, "%s\n", tokenLine)
 	}
+	if spend := rep.SpendLine(); spend != "" {
+		fmt.Fprintf(&b, "%s\n", spend)
+	}
 	if d := rep.DeltaLine(); d != "" {
 		fmt.Fprintf(&b, "%s\n", d)
 	}
@@ -410,6 +433,9 @@ func RenderWeekly(rep Report, md bool) string {
 		commits := ""
 		if d.Commits > 0 {
 			commits = fmt.Sprintf("  %d commits", d.Commits)
+		}
+		if d.Cost > 0 {
+			commits += "  " + money(d.Cost)
 		}
 		fmt.Fprintf(&b, "%-10s %-14s %8s%s%s%s\n", d.Date.Format("Mon 02"),
 			bar(d.Mins, maxDay, 14), hm(d.Mins), win, commits, top)
@@ -562,20 +588,26 @@ func (r Report) CoverageNote() string {
 // no price list.
 func (r Report) TokenLine() string {
 	var total Tokens
-	models := make([]string, 0, len(r.Tokens))
-	for m, tk := range r.Tokens {
+	byModel := map[string]*Tokens{}
+	for bucket, tk := range r.Tokens {
 		total.add(*tk)
-		models = append(models, m)
+		model := ModelOf(bucket)
+		if byModel[model] == nil {
+			byModel[model] = &Tokens{}
+		}
+		byModel[model].add(*tk)
 	}
 	if total.Calls == 0 {
 		return ""
 	}
-	sort.Slice(models, func(i, j int) bool {
-		return r.Tokens[models[i]].Out > r.Tokens[models[j]].Out
-	})
+	models := make([]string, 0, len(byModel))
+	for m := range byModel {
+		models = append(models, m)
+	}
+	sort.Slice(models, func(i, j int) bool { return byModel[models[i]].Out > byModel[models[j]].Out })
 	parts := make([]string, 0, len(models))
 	for _, m := range models {
-		parts = append(parts, fmt.Sprintf("%s %s out", shortModel(m), compact(r.Tokens[m].Out)))
+		parts = append(parts, fmt.Sprintf("%s %s out", shortModel(m), compact(byModel[m].Out)))
 	}
 	return fmt.Sprintf("%d AI calls · %s out · %s in · %s cache read · %s",
 		total.Calls, compact(total.Out), compact(total.In+total.CacheW),
@@ -687,4 +719,47 @@ func compact(n int64) string {
 		return fmt.Sprintf("%.0fk", float64(n)/1e3)
 	}
 	return fmt.Sprintf("%d", n)
+}
+
+// prices memoizes the table: Build runs on every TUI frame, the file does not
+// change between them.
+func prices(cfg Config) PriceTable {
+	key := cfg.PricesFile + "\x1f" + cfg.Prices
+	if pt, ok := priceCache[key]; ok {
+		return pt
+	}
+	pt := LoadPrices(cfg)
+	priceCache[key] = pt
+	return pt
+}
+
+var priceCache = map[string]PriceTable{}
+
+// SpendLine is the money sentence, with its source named so the number can be
+// argued with.
+func (r Report) SpendLine() string {
+	if !r.Prices.Known() {
+		return ""
+	}
+	models := make([]string, 0, len(r.Cost))
+	for m := range r.Cost {
+		models = append(models, m)
+	}
+	sort.Slice(models, func(i, j int) bool { return r.Cost[models[i]] > r.Cost[models[j]] })
+	parts := make([]string, 0, len(models))
+	for _, m := range models {
+		if r.Cost[m] > 0 {
+			parts = append(parts, fmt.Sprintf("%s %s", shortModel(m), money(r.Cost[m])))
+		}
+	}
+	line := fmt.Sprintf("%s spent · %s · priced from %s",
+		money(r.CostTotal), strings.Join(parts, ", "), r.Prices.Source)
+	if len(r.Unpriced) > 0 {
+		short := make([]string, 0, len(r.Unpriced))
+		for _, m := range r.Unpriced {
+			short = append(short, shortModel(m))
+		}
+		line += fmt.Sprintf(" (unpriced: %s)", strings.Join(short, ", "))
+	}
+	return line
 }

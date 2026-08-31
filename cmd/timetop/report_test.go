@@ -112,17 +112,20 @@ func TestJSONFieldCutsValueWithoutParsing(t *testing.T) {
 
 func TestUsageOfTakesMessageLevelCountsOnce(t *testing.T) {
 	// the iterations array repeats the same tokens; only the first copy counts
-	line := []byte(`{"type":"assistant","message":{"model":"claude-opus-5","usage":` +
+	line := []byte(`{"type":"assistant","requestId":"req_abc","message":{"model":"claude-opus-5","usage":` +
 		`{"input_tokens":2,"cache_creation_input_tokens":400,"cache_read_input_tokens":536013,` +
 		`"output_tokens":928,"iterations":[{"input_tokens":2,"output_tokens":928}]}}}`)
-	tk, model, ok := usageOf(line)
-	if !ok || model != "claude-opus-5" {
-		t.Fatalf("model %q ok %v", model, ok)
+	tk, bucket, id, ok := usageOf(line)
+	if !ok || ModelOf(bucket) != "claude-opus-5" {
+		t.Fatalf("bucket %q ok %v", bucket, ok)
 	}
 	if tk.In != 2 || tk.Out != 928 || tk.CacheR != 536013 || tk.CacheW != 400 || tk.Calls != 1 {
 		t.Fatalf("counts: %+v", tk)
 	}
-	if _, _, ok := usageOf([]byte(`{"type":"user"}`)); ok {
+	if id != "req_abc" {
+		t.Fatalf("the call id is what de-duplicates streamed rows: %q", id)
+	}
+	if _, _, _, ok := usageOf([]byte(`{"type":"user"}`)); ok {
 		t.Fatal("a line without usage is not an AI call")
 	}
 }
@@ -266,5 +269,86 @@ func TestWriteOutCreatesTheDirectory(t *testing.T) {
 func TestPostSlackRefusesWithoutAWebhook(t *testing.T) {
 	if err := postSlack("", "report"); err == nil {
 		t.Fatal("no webhook must be an error, not a silent no-op")
+	}
+}
+
+func TestPriceTableCostAppliesTheRulesTheCLIBillsBy(t *testing.T) {
+	pt := PriceTable{Source: "test", rates: map[string]Rates{
+		"claude-opus-5": {In: 5, Out: 25, CacheWrite: 6.25, CacheW1h: 10, CacheRead: 0.5, WebSearch: 0.01},
+	}}
+	// one million of each, with half the cache writes on the 1h TTL
+	tk := Tokens{In: 1_000_000, Out: 1_000_000, CacheR: 1_000_000,
+		CacheW: 1_000_000, CacheW1h: 500_000, WebSearch: 3}
+	got, ok := pt.Cost(bucketKey("claude-opus-5", "standard", "not_available"), tk)
+	if !ok {
+		t.Fatal("the model is in the table")
+	}
+	want := 5.0 + 25 + 0.5 + 0.5*10 + 0.5*6.25 + 3*0.01
+	if diff := got - want; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("got %f want %f", got, want)
+	}
+
+	// US-pinned inference carries a surcharge on tokens, never on web search
+	usGot, _ := pt.Cost(bucketKey("claude-opus-5", "standard", "us"), tk)
+	usWant := (want-3*0.01)*usGeoSurcharge + 3*0.01
+	if diff := usGot - usWant; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("us geo: got %f want %f", usGot, usWant)
+	}
+
+	// fast mode is billed at its own rates, above the model's usual tier
+	fastGot, _ := pt.Cost(bucketKey("claude-opus-5", "fast", ""), Tokens{Out: 1_000_000})
+	if fastGot != 50 {
+		t.Fatalf("fast output should cost $50/Mtok, got %f", fastGot)
+	}
+
+	if _, ok := pt.Cost(bucketKey("some-other-model", "", ""), tk); ok {
+		t.Fatal("an unpriced model must not silently cost zero")
+	}
+}
+
+func TestPriceTablePrefixFallbackFindsDatedModels(t *testing.T) {
+	pt := PriceTable{rates: map[string]Rates{"claude-opus-5": {Out: 25}}}
+	got, ok := pt.Cost(bucketKey("claude-opus-5-20260114", "", ""), Tokens{Out: 1_000_000})
+	if !ok || got != 25 {
+		t.Fatalf("dated ids should fall back to their family: %f %v", got, ok)
+	}
+}
+
+func TestParseCatalogRefusesAPartialTable(t *testing.T) {
+	good := []byte(`schema_version:1,pricing_tiers:{tier_5_25:{input:5,output:25,cache_write_5m:6.25,` +
+		`cache_write_1h:10,cache_read:0.5,web_search:0.01}},models:[{id:"claude-opus-5",family:"opus",` +
+		`display_name:"Opus 5",context:{window:1e6},pricing:"tier_5_25"}]`)
+	rates, err := parseCatalog(good)
+	if err != nil || rates["claude-opus-5"].Out != 25 {
+		t.Fatalf("rates %+v err %v", rates, err)
+	}
+	if _, err := parseCatalog([]byte(`schema_version:1,pricing_tiers:{}`)); err == nil {
+		t.Fatal("a table with no tiers must be an error, not empty prices")
+	}
+	if _, err := parseCatalog([]byte(`schema_version:1,pricing_tiers:{tier_5_25:{input:5,output:25,` +
+		`cache_write_5m:6.25,cache_write_1h:10,cache_read:0.5,web_search:0.01}}`)); err == nil {
+		t.Fatal("tiers with no model must be an error")
+	}
+}
+
+func TestVersionLessOrdersNumerically(t *testing.T) {
+	if !versionLess("/x/2.1.9", "/x/2.1.10") {
+		t.Fatal("2.1.9 comes before 2.1.10")
+	}
+	if versionLess("/x/2.2.0", "/x/2.1.99") {
+		t.Fatal("2.2.0 is newer than 2.1.99")
+	}
+}
+
+func TestJSONFloatReadsDecimalsAndScientific(t *testing.T) {
+	line := []byte(`{"type":"cost-state","totalCostUSD":0.1943,"other":1e-5}`)
+	if v, ok := jsonFloat(line, "totalCostUSD"); !ok || v != 0.1943 {
+		t.Fatalf("got %v %v", v, ok)
+	}
+	if v, ok := jsonFloat(line, "other"); !ok || v != 1e-5 {
+		t.Fatalf("scientific: %v %v", v, ok)
+	}
+	if _, ok := jsonFloat(line, "missing"); ok {
+		t.Fatal("absent key must not read as zero")
 	}
 }

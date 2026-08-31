@@ -18,7 +18,7 @@ import (
 
 // cacheVersion invalidates every cached transcript when the derived shape
 // changes — cheaper than migrating, and a full rescan is under a second.
-const cacheVersion = 3
+const cacheVersion = 4
 
 // minute index = unix seconds / 60; rendering converts to local time.
 type minute int64
@@ -35,12 +35,15 @@ func splitTask(key string) (proj, branch string) {
 }
 
 // Tokens is what an AI call cost in units nobody has to price: raw counts.
+// Cache writes are split by TTL because they are billed at different rates.
 type Tokens struct {
-	In     int64 `json:"i"`
-	Out    int64 `json:"o"`
-	CacheR int64 `json:"r"`
-	CacheW int64 `json:"w"`
-	Calls  int64 `json:"n"`
+	In        int64 `json:"i"`
+	Out       int64 `json:"o"`
+	CacheR    int64 `json:"r"`
+	CacheW    int64 `json:"w"`
+	CacheW1h  int64 `json:"w1h"`
+	WebSearch int64 `json:"ws"`
+	Calls     int64 `json:"n"`
 }
 
 func (t *Tokens) add(o Tokens) {
@@ -48,11 +51,33 @@ func (t *Tokens) add(o Tokens) {
 	t.Out += o.Out
 	t.CacheR += o.CacheR
 	t.CacheW += o.CacheW
+	t.CacheW1h += o.CacheW1h
+	t.WebSearch += o.WebSearch
 	t.Calls += o.Calls
 }
 
 // Total is every token the model actually read or wrote.
 func (t Tokens) Total() int64 { return t.In + t.Out + t.CacheR + t.CacheW }
+
+// bucketKey groups tokens by everything that changes their price: the model,
+// the speed tier and the inference region.
+func bucketKey(model, speed, geo string) string {
+	return model + taskSep + speed + taskSep + geo
+}
+
+func splitBucket(key string) (model, speed, geo string) {
+	parts := strings.SplitN(key, taskSep, 3)
+	for len(parts) < 3 {
+		parts = append(parts, "")
+	}
+	return parts[0], parts[1], parts[2]
+}
+
+// ModelOf is the display name of a token bucket.
+func ModelOf(bucket string) string {
+	m, _, _ := splitBucket(bucket)
+	return m
+}
 
 // Activity is the union of every source: worked minutes per project and per
 // task, the tokens burned, and the checkouts to ask about commits.
@@ -106,6 +131,10 @@ func Scan(cfg Config) (*Activity, error) {
 		Tokens:  map[string]map[string]*Tokens{},
 	}
 	dirty := false
+	// one project can be seen through several checkouts (a duty clone, a dead
+	// worktree, the dev tree): the one most sessions ran in is the one to ask
+	// about commits
+	rootVotes := map[string]map[string]int{}
 	err := filepath.WalkDir(cfg.TranscriptDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".jsonl") {
 			return nil //nolint:nilerr // unreadable corners are skipped, not fatal
@@ -133,9 +162,10 @@ func Scan(cfg Config) (*Activity, error) {
 			act.Human[minute(m)] = true
 		}
 		for proj, root := range fc.Roots {
-			if _, ok := act.Roots[proj]; !ok {
-				act.Roots[proj] = root
+			if rootVotes[proj] == nil {
+				rootVotes[proj] = map[string]int{}
 			}
+			rootVotes[proj][root]++
 		}
 		for day, byModel := range fc.Tokens {
 			if act.Tokens[day] == nil {
@@ -152,6 +182,9 @@ func Scan(cfg Config) (*Activity, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	for proj, votes := range rootVotes {
+		act.Roots[proj] = bestRoot(votes)
 	}
 	for _, set := range act.Minutes {
 		for m := range set {
@@ -202,6 +235,9 @@ func scanFile(path string, cfg Config) *fileCache {
 
 	byTask := map[string][]int64{}
 	var agent, human []int64
+	// one API call writes several assistant rows; requestId is what makes them
+	// one call again, and counting rows would inflate every token number
+	seenCall := map[string]bool{}
 	r := bufio.NewReaderSize(f, 1<<20)
 	for {
 		line, err := readLine(r)
@@ -221,14 +257,17 @@ func scanFile(path string, cfg Config) *fileCache {
 					if _, ok := fc.Roots[proj]; !ok {
 						fc.Roots[proj] = root
 					}
-					if tk, model, ok := usageOf(line); ok {
+					if tk, bucket, id, ok := usageOf(line); ok && !seenCall[id] {
+						if id != "" {
+							seenCall[id] = true
+						}
 						day := t.Local().Format("2006-01-02")
 						if fc.Tokens[day] == nil {
 							fc.Tokens[day] = map[string]Tokens{}
 						}
-						cur := fc.Tokens[day][model]
+						cur := fc.Tokens[day][bucket]
 						cur.add(tk)
-						fc.Tokens[day][model] = cur
+						fc.Tokens[day][bucket] = cur
 					}
 				}
 			}
@@ -255,26 +294,33 @@ func unattended(entrypoint string) bool {
 }
 
 // usageOf reads the token counts off an assistant line. The first occurrence
-// of each key is the message-level usage; the per-iteration copies that follow
-// are the same tokens counted again.
-func usageOf(line []byte) (Tokens, string, bool) {
+// of each key inside the usage object is the message-level count; the
+// per-iteration copies that follow are the same tokens counted again. The
+// returned id is the API call this row belongs to, for de-duplication.
+func usageOf(line []byte) (tk Tokens, bucket, id string, ok bool) {
 	i := strings.Index(string(line), `"usage":{`)
 	if i < 0 {
-		return Tokens{}, "", false
+		return Tokens{}, "", "", false
 	}
 	rest := line[i:]
-	tk := Tokens{
-		In:     jsonNum(rest, "input_tokens"),
-		Out:    jsonNum(rest, "output_tokens"),
-		CacheR: jsonNum(rest, "cache_read_input_tokens"),
-		CacheW: jsonNum(rest, "cache_creation_input_tokens"),
-		Calls:  1,
+	tk = Tokens{
+		In:        jsonNum(rest, "input_tokens"),
+		Out:       jsonNum(rest, "output_tokens"),
+		CacheR:    jsonNum(rest, "cache_read_input_tokens"),
+		CacheW:    jsonNum(rest, "cache_creation_input_tokens"),
+		CacheW1h:  jsonNum(rest, "ephemeral_1h_input_tokens"),
+		WebSearch: jsonNum(rest, "web_search_requests"),
+		Calls:     1,
 	}
 	model := jsonField(line, "model")
 	if model == "" {
 		model = "unknown"
 	}
-	return tk, model, true
+	id = jsonField(line, "requestId")
+	if id == "" {
+		id = jsonField(line, "id") // message id, when the request id is absent
+	}
+	return tk, bucketKey(model, jsonField(rest, "speed"), jsonField(rest, "inference_geo")), id, true
 }
 
 // fillGaps marks every minute between two events that sit within the idle gap,
@@ -433,4 +479,22 @@ func saveCache(path string, c *scanCache) {
 	if os.WriteFile(tmp, data, 0o644) == nil {
 		_ = os.Rename(tmp, path)
 	}
+}
+
+// bestRoot picks the checkout to ask about a project's commits: the one most
+// sessions ran in, and among equals one that still exists on disk.
+func bestRoot(votes map[string]int) string {
+	best, bestScore := "", -1
+	for root, n := range votes {
+		score := n * 2
+		if st, err := os.Stat(root); err == nil && st.IsDir() {
+			score++
+		} else {
+			score -= 1000 // a path that is gone cannot answer git questions
+		}
+		if score > bestScore || (score == bestScore && root < best) {
+			best, bestScore = root, score
+		}
+	}
+	return best
 }
