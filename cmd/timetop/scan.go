@@ -6,19 +6,22 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // cacheVersion invalidates every cached transcript when the derived shape
 // changes — cheaper than migrating, and a full rescan is under a second.
-const cacheVersion = 4
+const cacheVersion = 5
 
 // minute index = unix seconds / 60; rendering converts to local time.
 type minute int64
@@ -104,15 +107,26 @@ type Commit struct {
 // fileCache is what we remember about one transcript so a rescan of an
 // unchanged file costs nothing.
 type fileCache struct {
-	V       int                          `json:"v"`
-	Size    int64                        `json:"size"`
-	ModTime int64                        `json:"mtime"`
-	Gap     int                          `json:"gap"`
-	Minutes map[string][]int64           `json:"minutes"` // task key -> minutes
-	Agent   []int64                      `json:"agent"`   // unattended minutes
-	Human   []int64                      `json:"human"`
-	Roots   map[string]string            `json:"roots"`
-	Tokens  map[string]map[string]Tokens `json:"tokens"` // day -> model -> counts
+	V       int                `json:"v"`
+	Env     string             `json:"env"` // timezone and aliases are baked into the values below
+	Size    int64              `json:"size"`
+	ModTime int64              `json:"mtime"`
+	Gap     int                `json:"gap"`
+	Minutes map[string][]int64 `json:"minutes"` // task key -> minutes
+	Agent   []int64            `json:"agent"`   // unattended minutes
+	Human   []int64            `json:"human"`
+	Roots   map[string]string  `json:"roots"`
+	Calls   []Call             `json:"calls"` // one record per API call, for cross-file de-duplication
+}
+
+// Call is one API call as the transcripts record it. Sessions get forked and
+// resumed, which copies rows into a new file; the id is what keeps a call from
+// being counted twice.
+type Call struct {
+	ID     string `json:"id"`
+	Day    string `json:"d"`
+	Bucket string `json:"b"`
+	T      Tokens `json:"t"`
 }
 
 type scanCache struct {
@@ -121,6 +135,10 @@ type scanCache struct {
 
 // Scan walks the transcript tree and returns every worked minute it can prove.
 func Scan(cfg Config) (*Activity, error) {
+	if st, err := os.Stat(cfg.TranscriptDir); err != nil || !st.IsDir() {
+		return nil, fmt.Errorf("no transcripts at %s — set TRANSCRIPT_DIR in %s",
+			cfg.TranscriptDir, filepath.Join(configDir(), "config.env"))
+	}
 	cache := loadCache(cfg.CachePath())
 	act := &Activity{
 		Minutes: map[string]map[minute]bool{},
@@ -135,6 +153,7 @@ func Scan(cfg Config) (*Activity, error) {
 	// worktree, the dev tree): the one most sessions ran in is the one to ask
 	// about commits
 	rootVotes := map[string]map[string]int{}
+	seenCalls := map[string]bool{}
 	err := filepath.WalkDir(cfg.TranscriptDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".jsonl") {
 			return nil //nolint:nilerr // unreadable corners are skipped, not fatal
@@ -145,7 +164,8 @@ func Scan(cfg Config) (*Activity, error) {
 		}
 		fc := cache.Files[path]
 		if fc == nil || fc.V != cacheVersion || fc.Size != st.Size() ||
-			fc.ModTime != st.ModTime().Unix() || fc.Gap != cfg.GapMinutes {
+			fc.ModTime != st.ModTime().Unix() || fc.Gap != cfg.GapMinutes ||
+			fc.Env != cacheEnv(cfg) {
 			fc = scanFile(path, cfg)
 			cache.Files[path] = fc
 			dirty = true
@@ -167,16 +187,20 @@ func Scan(cfg Config) (*Activity, error) {
 			}
 			rootVotes[proj][root]++
 		}
-		for day, byModel := range fc.Tokens {
-			if act.Tokens[day] == nil {
-				act.Tokens[day] = map[string]*Tokens{}
-			}
-			for model, tk := range byModel {
-				if act.Tokens[day][model] == nil {
-					act.Tokens[day][model] = &Tokens{}
+		for _, c := range fc.Calls {
+			if c.ID != "" {
+				if seenCalls[c.ID] {
+					continue
 				}
-				act.Tokens[day][model].add(tk)
+				seenCalls[c.ID] = true
 			}
+			if act.Tokens[c.Day] == nil {
+				act.Tokens[c.Day] = map[string]*Tokens{}
+			}
+			if act.Tokens[c.Day][c.Bucket] == nil {
+				act.Tokens[c.Day][c.Bucket] = &Tokens{}
+			}
+			act.Tokens[c.Day][c.Bucket].add(c.T)
 		}
 		return nil
 	})
@@ -216,21 +240,21 @@ func addMinutes(dst map[string]map[minute]bool, key string, mins []int64) {
 // can be megabytes of tool output, and JSON-decoding all of it is 20x slower.
 func scanFile(path string, cfg Config) *fileCache {
 	fc := &fileCache{
-		V: cacheVersion, Gap: cfg.GapMinutes,
+		V: cacheVersion, Gap: cfg.GapMinutes, Env: cacheEnv(cfg),
 		Minutes: map[string][]int64{},
 		Roots:   map[string]string{},
-		Tokens:  map[string]map[string]Tokens{},
 	}
 	st, err := os.Stat(path)
 	if err != nil {
 		return fc
 	}
-	fc.Size, fc.ModTime = st.Size(), st.ModTime().Unix()
-
 	f, err := os.Open(path)
 	if err != nil {
+		// leave the size at zero so the next scan tries this file again
+		// instead of trusting an empty result forever
 		return fc
 	}
+	fc.Size, fc.ModTime = st.Size(), st.ModTime().Unix()
 	defer f.Close()
 
 	byTask := map[string][]int64{}
@@ -261,13 +285,9 @@ func scanFile(path string, cfg Config) *fileCache {
 						if id != "" {
 							seenCall[id] = true
 						}
-						day := t.Local().Format("2006-01-02")
-						if fc.Tokens[day] == nil {
-							fc.Tokens[day] = map[string]Tokens{}
-						}
-						cur := fc.Tokens[day][bucket]
-						cur.add(tk)
-						fc.Tokens[day][bucket] = cur
+						fc.Calls = append(fc.Calls, Call{
+							ID: id, Day: t.Local().Format("2006-01-02"), Bucket: bucket, T: tk,
+						})
 					}
 				}
 			}
@@ -298,11 +318,24 @@ func unattended(entrypoint string) bool {
 // per-iteration copies that follow are the same tokens counted again. The
 // returned id is the API call this row belongs to, for de-duplication.
 func usageOf(line []byte) (tk Tokens, bucket, id string, ok bool) {
-	i := strings.Index(string(line), `"usage":{`)
+	// Only an assistant row is an API call. A tool result can echo a
+	// subagent's usage back into the parent transcript, and that call is
+	// already counted in the subagent's own file. The literal search is
+	// deliberate: the row's "type" is serialized after "message", so a keyed
+	// lookup would find the message's own type instead.
+	if !bytes.Contains(line, []byte(`"type":"assistant"`)) {
+		return Tokens{}, "", "", false
+	}
+	m := bytes.Index(line, []byte(`"message":{`))
+	if m < 0 {
+		return Tokens{}, "", "", false
+	}
+	msg := line[m:]
+	i := bytes.Index(msg, []byte(`"usage":{`))
 	if i < 0 {
 		return Tokens{}, "", "", false
 	}
-	rest := line[i:]
+	rest := msg[i:]
 	tk = Tokens{
 		In:        jsonNum(rest, "input_tokens"),
 		Out:       jsonNum(rest, "output_tokens"),
@@ -312,13 +345,13 @@ func usageOf(line []byte) (tk Tokens, bucket, id string, ok bool) {
 		WebSearch: jsonNum(rest, "web_search_requests"),
 		Calls:     1,
 	}
-	model := jsonField(line, "model")
+	model := jsonField(msg, "model") // from the message, never from tool output
 	if model == "" {
 		model = "unknown"
 	}
 	id = jsonField(line, "requestId")
 	if id == "" {
-		id = jsonField(line, "id") // message id, when the request id is absent
+		id = jsonField(msg, "id") // message id, when the request id is absent
 	}
 	return tk, bucketKey(model, jsonField(rest, "speed"), jsonField(rest, "inference_geo")), id, true
 }
@@ -327,6 +360,10 @@ func usageOf(line []byte) (tk Tokens, bucket, id string, ok bool) {
 // so a session reads as continuous work instead of a dotted line of pings.
 // A lone event still counts as one worked minute.
 func fillGaps(ts []int64, gap int64) []int64 {
+	if !sort.SliceIsSorted(ts, func(i, j int) bool { return ts[i] < ts[j] }) {
+		ts = append([]int64(nil), ts...)
+		sort.Slice(ts, func(i, j int) bool { return ts[i] < ts[j] })
+	}
 	out := make([]int64, 0, len(ts))
 	var last int64 = -1
 	for _, t := range ts {
@@ -421,12 +458,20 @@ func projectOf(cwd string, cfg Config) (name, root string) {
 	return name, root
 }
 
-var topLevels = map[string]string{}
-var remoteNames = map[string]string{}
+// the memo maps are read from the TUI's render path and written from the
+// rescan goroutine, so they carry a lock
+var (
+	gitMemo     sync.Mutex
+	topLevels   = map[string]string{}
+	remoteNames = map[string]string{}
+)
 
 // gitRemoteName is the repo name as the forge knows it, memoized per root.
 func gitRemoteName(root string) string {
-	if v, ok := remoteNames[root]; ok {
+	gitMemo.Lock()
+	v, ok := remoteNames[root]
+	gitMemo.Unlock()
+	if ok {
 		return v
 	}
 	name := ""
@@ -436,14 +481,19 @@ func gitRemoteName(root string) string {
 			name = url[i+1:]
 		}
 	}
+	gitMemo.Lock()
 	remoteNames[root] = name
+	gitMemo.Unlock()
 	return name
 }
 
 // gitTopLevel resolves a path to its repository root (empty if the path is
 // gone or untracked). Results are memoized: one exec per distinct cwd.
 func gitTopLevel(path string) string {
-	if v, ok := topLevels[path]; ok {
+	gitMemo.Lock()
+	v, ok := topLevels[path]
+	gitMemo.Unlock()
+	if ok {
 		return v
 	}
 	out, err := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel").Output()
@@ -451,7 +501,9 @@ func gitTopLevel(path string) string {
 	if err == nil {
 		top = strings.TrimSpace(string(out))
 	}
+	gitMemo.Lock()
 	topLevels[path] = top
+	gitMemo.Unlock()
 	return top
 }
 
@@ -486,15 +538,27 @@ func saveCache(path string, c *scanCache) {
 func bestRoot(votes map[string]int) string {
 	best, bestScore := "", -1
 	for root, n := range votes {
-		score := n * 2
+		// existence outranks any number of votes: a path that is gone cannot
+		// answer git questions at all
+		score := n
 		if st, err := os.Stat(root); err == nil && st.IsDir() {
-			score++
-		} else {
-			score -= 1000 // a path that is gone cannot answer git questions
+			score += 1 << 40
 		}
 		if score > bestScore || (score == bestScore && root < best) {
 			best, bestScore = root, score
 		}
 	}
-	return best
+	return best // a project whose every checkout is gone still names one
+}
+
+// cacheEnv fingerprints everything outside the file that shaped its cached
+// values: day boundaries come from the local zone, project names from aliases.
+func cacheEnv(cfg Config) string {
+	zone, offset := time.Now().Zone()
+	aliases := make([]string, 0, len(cfg.Aliases))
+	for from, to := range cfg.Aliases {
+		aliases = append(aliases, from+":"+to)
+	}
+	sort.Strings(aliases)
+	return fmt.Sprintf("%s%d|%s", zone, offset, strings.Join(aliases, ","))
 }

@@ -115,6 +115,8 @@ func RenderCheck(checks []costCheck) string {
 	if skipped > 0 {
 		fmt.Fprintf(&b, "\n%d session(s) with a $0 record were left out of the comparison\n", skipped)
 	}
+	fmt.Fprint(&b, "\nours counts the calls the transcripts attribute to a priced model;\n"+
+		"a negative drift is calls Claude Code billed but wrote no row for\n")
 	return b.String()
 }
 

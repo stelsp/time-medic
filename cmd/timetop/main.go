@@ -132,12 +132,28 @@ func main() {
 		}
 	case "scan":
 		act := mustScan(cfg)
-		total := 0
-		for proj, set := range act.Minutes {
-			fmt.Printf("%-30s %s\n", proj, hm(len(set)))
-			total += len(set)
+		type row struct {
+			name string
+			mins int
 		}
-		fmt.Printf("%-30s %s tracked all-time\n", "TOTAL", hm(total))
+		rows := make([]row, 0, len(act.Minutes))
+		wall := map[minute]bool{}
+		for proj, set := range act.Minutes {
+			rows = append(rows, row{proj, len(set)})
+			for m := range set {
+				wall[m] = true
+			}
+		}
+		sort.Slice(rows, func(i, j int) bool {
+			if rows[i].mins != rows[j].mins {
+				return rows[i].mins > rows[j].mins
+			}
+			return rows[i].name < rows[j].name
+		})
+		for _, r := range rows {
+			fmt.Printf("%-30s %s\n", r.name, hm(r.mins))
+		}
+		fmt.Printf("%-30s %s of wall clock, all time\n", "TOTAL", hm(len(wall)))
 	default:
 		fmt.Print(usage)
 		os.Exit(2)

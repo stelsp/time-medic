@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestFillGapsBridgesShortIdleOnly(t *testing.T) {
@@ -350,5 +352,117 @@ func TestJSONFloatReadsDecimalsAndScientific(t *testing.T) {
 	}
 	if _, ok := jsonFloat(line, "missing"); ok {
 		t.Fatal("absent key must not read as zero")
+	}
+}
+
+func TestUsageOfIgnoresEchoedToolResults(t *testing.T) {
+	// a tool result can carry a subagent's usage payload; that call belongs to
+	// the subagent's own transcript and must not be billed twice here
+	echo := []byte(`{"type":"user","toolUseResult":{"usage":{"input_tokens":10,"output_tokens":20},` +
+		`"model":"claude-opus-5"}}`)
+	if _, _, _, ok := usageOf(echo); ok {
+		t.Fatal("only an assistant row is an API call")
+	}
+	real := []byte(`{"type":"assistant","requestId":"req_1","message":{"model":"claude-fable-5",` +
+		`"usage":{"input_tokens":10,"output_tokens":20}}}`)
+	tk, bucket, id, ok := usageOf(real)
+	if !ok || ModelOf(bucket) != "claude-fable-5" || id != "req_1" || tk.Out != 20 {
+		t.Fatalf("assistant row: %+v %q %q %v", tk, bucket, id, ok)
+	}
+}
+
+func TestDayBoundariesSurviveAZoneThatSkipsMidnight(t *testing.T) {
+	loc, err := time.LoadLocation("America/Santiago") // clocks jump 00:00 → 01:00
+	if err != nil {
+		t.Skip("zone database unavailable")
+	}
+	transition := time.Date(2026, 9, 6, 15, 0, 0, 0, loc)
+	start := dayStart(transition)
+	if start.Day() != 6 || start.Month() != time.September {
+		t.Fatalf("day start fell into the previous day: %s", start)
+	}
+	if next := nextDay(start); next.Day() != 7 {
+		t.Fatalf("next day: %s", next)
+	}
+	w := Weekly(transition)
+	days := 0
+	for d := w.From; d.Before(w.To); d = nextDay(d) {
+		days++
+	}
+	if days != 7 {
+		t.Fatalf("a week has seven days even across a transition, got %d", days)
+	}
+}
+
+func TestTaskRefIgnoresDatesAndVersions(t *testing.T) {
+	for _, branch := range []string{"release-2026-08", "v1-2-3", "cleanup-2024"} {
+		if got := taskRef(branch, nil); got != "" {
+			t.Fatalf("%q should name no issue, got %q", branch, got)
+		}
+	}
+	for branch, want := range map[string]string{
+		"feat-116": "#116", "fix/2043": "#2043", "bugfix_7": "#7", "feature-116-s2": "#116",
+	} {
+		if got := taskRef(branch, nil); got != want {
+			t.Fatalf("%q: got %q want %q", branch, got, want)
+		}
+	}
+}
+
+func TestAnsiTruncKeepsEscapesIntact(t *testing.T) {
+	colored := "\x1b[38;5;214mamber\x1b[0m tail"
+	got := ansiTrunc(colored, 5)
+	if !strings.HasPrefix(got, "\x1b[38;5;214m") {
+		t.Fatalf("color start lost: %q", got)
+	}
+	if strings.Contains(got, "tail") {
+		t.Fatalf("cut past the width: %q", got)
+	}
+	if !strings.HasSuffix(got, "\x1b[0m") {
+		t.Fatalf("must close the color it opened: %q", got)
+	}
+}
+
+func TestFitFrameNeverExceedsTheTerminal(t *testing.T) {
+	frame := strings.Join([]string{strings.Repeat("x", 50), "short", strings.Repeat("y", 90)}, "\n")
+	got := fitFrame(frame, 20, 2)
+	lines := strings.Split(got, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("height not clipped: %d lines", len(lines))
+	}
+	for _, ln := range lines {
+		if lipgloss.Width(ln) > 20 {
+			t.Fatalf("line wider than the terminal: %q", ln)
+		}
+	}
+}
+
+func TestBestRootPrefersACheckoutThatStillExists(t *testing.T) {
+	live := t.TempDir()
+	if got := bestRoot(map[string]int{"/gone/for/good": 500, live: 1}); got != live {
+		t.Fatalf("existence outranks votes, got %q", got)
+	}
+	if got := bestRoot(map[string]int{"/gone/a": 1, "/gone/b": 2}); got != "/gone/b" {
+		t.Fatalf("with every checkout gone the most-seen one still names it, got %q", got)
+	}
+}
+
+func TestUnpricedModelIsReportedNotSilentlyFree(t *testing.T) {
+	base := time.Date(2026, 8, 26, 10, 0, 0, 0, time.Local)
+	day := base.Format("2006-01-02")
+	act := &Activity{
+		Minutes: map[string]map[minute]bool{"p": {minute(base.Unix() / 60): true}},
+		Tasks:   map[string]map[minute]bool{},
+		Roots:   map[string]string{},
+		Tokens: map[string]map[string]*Tokens{day: {
+			bucketKey("brand-new-model", "standard", ""): {Out: 2_000_000, Calls: 1},
+		}},
+	}
+	rep := Build(act, Config{GapMinutes: 15}, Daily(base))
+	if rep.CostTotal != 0 {
+		t.Fatalf("an unknown model must not be priced: %f", rep.CostTotal)
+	}
+	if len(rep.Unpriced) != 1 || rep.Unpriced[0] != "brand-new-model" {
+		t.Fatalf("unpriced models must be named: %v", rep.Unpriced)
 	}
 }

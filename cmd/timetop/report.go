@@ -35,6 +35,7 @@ type DayStat struct {
 	Commits int
 	Tokens  Tokens
 	Cost    float64
+	Covered bool // a transcript could have recorded this day at all
 }
 
 // TaskStat is one unit of work as the forge sees it: a branch, the time that
@@ -46,8 +47,10 @@ type TaskStat struct {
 	Mins     int
 	Commits  []Commit
 	Branches []string // every branch that carried this task in the period
-	Merged   bool
-	Gone     bool // no branch of this task is left in the repo
+	Merged   bool     // every branch of it that still exists has landed
+	Gone     bool     // no branch of this task is left in the repo
+	live     int      // branches still in the repo
+	landed   int      // of those, how many are merged
 	Last     time.Time
 }
 
@@ -71,19 +74,41 @@ type Report struct {
 	CoverageFrom time.Time
 }
 
+// dayStart is midnight local — or the first moment of the day in zones where
+// the clock jumps over midnight on a DST change, where plain time.Date would
+// silently hand back the previous day.
+func dayStart(t time.Time) time.Time {
+	d := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	for i := 0; i < 4 && d.Day() != t.Day(); i++ {
+		d = d.Add(time.Hour)
+	}
+	return d
+}
+
+// nextDay is the start of the day after t. The step is taken from midday so a
+// zone that skips midnight cannot normalize the answer back onto the same day.
+func nextDay(t time.Time) time.Time {
+	noon := time.Date(t.Year(), t.Month(), t.Day(), 12, 0, 0, 0, t.Location())
+	return dayStart(noon.AddDate(0, 0, 1))
+}
+
 // Weekly returns the ISO week containing t, Monday to Monday.
 func Weekly(t time.Time) Period {
-	d := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	d := dayStart(t)
 	off := (int(d.Weekday()) + 6) % 7 // Monday = 0
-	from := d.AddDate(0, 0, -off)
+	from := dayStart(d.AddDate(0, 0, -off))
+	to := from
+	for i := 0; i < 7; i++ {
+		to = nextDay(to)
+	}
 	y, w := from.ISOWeek()
-	return Period{From: from, To: from.AddDate(0, 0, 7), Label: fmt.Sprintf("%d-W%02d", y, w)}
+	return Period{From: from, To: to, Label: fmt.Sprintf("%d-W%02d", y, w)}
 }
 
 // Daily returns the single day containing t.
 func Daily(t time.Time) Period {
-	from := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
-	return Period{From: from, To: from.AddDate(0, 0, 1), Label: from.Format("2006-01-02 Mon")}
+	from := dayStart(t)
+	return Period{From: from, To: nextDay(from), Label: from.Format("2006-01-02 Mon")}
 }
 
 // Build slices the activity down to one period and derives every number the
@@ -178,7 +203,7 @@ func Build(act *Activity, cfg Config, p Period) Report {
 			commitsPerDay[c.When.Format("2006-01-02")]++
 		}
 	}
-	for d := p.From; d.Before(p.To); d = d.AddDate(0, 0, 1) {
+	for d := p.From; d.Before(p.To); d = nextDay(d) {
 		key := d.Format("2006-01-02")
 		ds := days[key]
 		if ds == nil {
@@ -186,15 +211,23 @@ func Build(act *Activity, cfg Config, p Period) Report {
 		}
 		ds.Mins = dayWall[key]
 		ds.Commits = commitsPerDay[key]
+		ds.Covered = !act.First.IsZero() && !nextDay(d).Before(act.First)
 		rep.Days = append(rep.Days, *ds)
 	}
 
-	sort.Slice(rep.Projects, func(i, j int) bool { return rep.Projects[i].Mins > rep.Projects[j].Mins })
+	sort.Slice(rep.Projects, func(i, j int) bool {
+		if rep.Projects[i].Mins != rep.Projects[j].Mins {
+			return rep.Projects[i].Mins > rep.Projects[j].Mins
+		}
+		return rep.Projects[i].Name < rep.Projects[j].Name
+	})
 	sort.Slice(rep.Sessions, func(i, j int) bool { return rep.Sessions[i].Start.Before(rep.Sessions[j].Start) })
 
+	// unattended minutes are only the ones nobody was at the keyboard for, and
+	// only those the wall clock already counted
 	for m := range act.Agent {
 		t := time.Unix(int64(m)*60, 0)
-		if !t.Before(p.From) && t.Before(p.To) && !act.Human[m] {
+		if !t.Before(p.From) && t.Before(p.To) && !act.Human[m] && wall[m] {
 			rep.AgentMins++
 		}
 	}
@@ -264,12 +297,21 @@ func buildTasks(act *Activity, cfg Config, p Period, author string) []TaskStat {
 			ts.Gone = !branchExists(root, branch)
 			ts.Commits = commitsOnBranch(root, branch, a, p.From, p.To)
 			ts.Merged = branchMerged(root, branch)
+			if !ts.Gone {
+				ts.live = 1
+				if ts.Merged {
+					ts.landed = 1
+				}
+			}
 		}
 		ts.Ref = taskRef(branch, ts.Commits)
 
 		gkey := proj + taskSep + branch
-		if ts.Ref != "" {
+		switch {
+		case ts.Ref != "":
 			gkey = proj + taskSep + ts.Ref
+		case isTrunk(branch):
+			gkey = proj + taskSep + "trunk" // main and a detached HEAD are one
 		}
 		g := groups[gkey]
 		if g == nil {
@@ -288,11 +330,11 @@ func buildTasks(act *Activity, cfg Config, p Period, author string) []TaskStat {
 			}
 		}
 		g.stat.Branches = append(g.stat.Branches, branch)
-		// a task is merged only when every branch that carried it landed, and
-		// gone only when none of them is left
-		g.stat.Merged = g.stat.Merged && ts.Merged
-		g.stat.Gone = g.stat.Gone && ts.Gone
-		if ts.Last.After(g.stat.Last) {
+		// a task has landed when every branch of it that still exists has
+		// landed; branches deleted after their merge must not vote it down
+		g.stat.live += ts.live
+		g.stat.landed += ts.landed
+		if ts.Last.After(g.stat.Last) || (ts.Last.Equal(g.stat.Last) && branch < g.stat.Branch) {
 			g.stat.Last = ts.Last
 			g.stat.Branch = branch // the branch worked on most recently names it
 		}
@@ -302,6 +344,8 @@ func buildTasks(act *Activity, cfg Config, p Period, author string) []TaskStat {
 	for _, g := range groups {
 		st := g.stat
 		st.Mins = len(g.minutes)
+		st.Gone = st.live == 0 && st.Branch != ""
+		st.Merged = st.live > 0 && st.landed == st.live
 		sort.Slice(st.Commits, func(i, j int) bool { return st.Commits[i].When.After(st.Commits[j].When) })
 		sort.Strings(st.Branches)
 		out = append(out, st)
@@ -437,8 +481,12 @@ func RenderWeekly(rep Report, md bool) string {
 		if d.Cost > 0 {
 			commits += "  " + money(d.Cost)
 		}
+		hours := hm(d.Mins)
+		if d.Mins == 0 && !d.Covered {
+			hours = "no data" // an unmeasured day is not an idle day
+		}
 		fmt.Fprintf(&b, "%-10s %-14s %8s%s%s%s\n", d.Date.Format("Mon 02"),
-			bar(d.Mins, maxDay, 14), hm(d.Mins), win, commits, top)
+			bar(d.Mins, maxDay, 14), hours, win, commits, top)
 	}
 	fmt.Fprint(&b, post(md)+"\n")
 
@@ -484,8 +532,25 @@ func RenderDaily(rep Report, md bool) string {
 		return b.String()
 	}
 	d := rep.Days[0]
-	fmt.Fprintf(&b, "%s · %s–%s · %d sessions\n\n", hm(rep.TotalMins),
+	fmt.Fprintf(&b, "%s · %s–%s · %d sessions\n", hm(rep.TotalMins),
 		d.First.Format("15:04"), d.Last.Format("15:04"), len(rep.Sessions))
+	if rep.SumMins > rep.TotalMins {
+		fmt.Fprintf(&b, "%s across projects (%s of it in parallel sessions)\n",
+			hm(rep.SumMins), hm(rep.SumMins-rep.TotalMins))
+	}
+	if rep.AgentMins > 0 {
+		fmt.Fprintf(&b, "%s of it unattended agent runs — no human at the keyboard\n", hm(rep.AgentMins))
+	}
+	if tokenLine := rep.TokenLine(); tokenLine != "" {
+		fmt.Fprintf(&b, "%s\n", tokenLine)
+	}
+	if spend := rep.SpendLine(); spend != "" {
+		fmt.Fprintf(&b, "%s\n", spend)
+	}
+	if note := rep.CoverageNote(); note != "" {
+		fmt.Fprintf(&b, "%s\n", note)
+	}
+	fmt.Fprint(&b, "\n")
 
 	fmt.Fprintf(&b, "%sPROJECTS\n%s", h2, pre(md))
 	for _, p := range rep.Projects {
@@ -529,7 +594,7 @@ func RenderDaily(rep Report, md bool) string {
 func topProj(m map[string]int) (string, int) {
 	best, bestN := "", 0
 	for k, v := range m {
-		if v > bestN {
+		if v > bestN || (v == bestN && v > 0 && k < best) {
 			best, bestN = k, v
 		}
 	}
@@ -559,8 +624,13 @@ func post(md bool) string {
 
 func trunc(s string, n int) string {
 	r := []rune(s)
-	if len(r) <= n {
+	switch {
+	case n <= 0:
+		return ""
+	case len(r) <= n:
 		return s
+	case n == 1:
+		return "…"
 	}
 	return string(r[:n-1]) + "…"
 }
@@ -604,13 +674,18 @@ func (r Report) TokenLine() string {
 	for m := range byModel {
 		models = append(models, m)
 	}
-	sort.Slice(models, func(i, j int) bool { return byModel[models[i]].Out > byModel[models[j]].Out })
+	sort.Slice(models, func(i, j int) bool {
+		if byModel[models[i]].Out != byModel[models[j]].Out {
+			return byModel[models[i]].Out > byModel[models[j]].Out
+		}
+		return models[i] < models[j]
+	})
 	parts := make([]string, 0, len(models))
 	for _, m := range models {
 		parts = append(parts, fmt.Sprintf("%s %s out", shortModel(m), compact(byModel[m].Out)))
 	}
-	return fmt.Sprintf("%d AI calls · %s out · %s in · %s cache read · %s",
-		total.Calls, compact(total.Out), compact(total.In+total.CacheW),
+	return fmt.Sprintf("%d AI calls · %s out · %s in · %s cache write · %s cache read · %s",
+		total.Calls, compact(total.Out), compact(total.In), compact(total.CacheW),
 		compact(total.CacheR), strings.Join(parts, ", "))
 }
 
@@ -745,7 +820,12 @@ func (r Report) SpendLine() string {
 	for m := range r.Cost {
 		models = append(models, m)
 	}
-	sort.Slice(models, func(i, j int) bool { return r.Cost[models[i]] > r.Cost[models[j]] })
+	sort.Slice(models, func(i, j int) bool {
+		if r.Cost[models[i]] != r.Cost[models[j]] {
+			return r.Cost[models[i]] > r.Cost[models[j]]
+		}
+		return models[i] < models[j]
+	})
 	parts := make([]string, 0, len(models))
 	for _, m := range models {
 		if r.Cost[m] > 0 {
@@ -755,11 +835,20 @@ func (r Report) SpendLine() string {
 	line := fmt.Sprintf("%s spent · %s · priced from %s",
 		money(r.CostTotal), strings.Join(parts, ", "), r.Prices.Source)
 	if len(r.Unpriced) > 0 {
+		var unpriced Tokens
+		for bucket, tk := range r.Tokens {
+			for _, m := range r.Unpriced {
+				if ModelOf(bucket) == m {
+					unpriced.add(*tk)
+				}
+			}
+		}
 		short := make([]string, 0, len(r.Unpriced))
 		for _, m := range r.Unpriced {
 			short = append(short, shortModel(m))
 		}
-		line += fmt.Sprintf(" (unpriced: %s)", strings.Join(short, ", "))
+		line += fmt.Sprintf(" — %s tokens on unpriced models are missing from this figure (%s)",
+			compact(unpriced.Total()), strings.Join(short, ", "))
 	}
 	return line
 }

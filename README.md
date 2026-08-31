@@ -102,16 +102,20 @@ weekly as markdown, `Y` copy the selected day, `r` rescan, `q` quit.
   inside itself: the same tiers it bills you with, including the 1h vs 5m
   cache-write split, the US-inference surcharge and fast-mode rates. Upgrade
   the CLI and the prices follow. Nothing is hardcoded, nothing is fetched.
-  `timetop prices --check` replays the sessions where Claude Code recorded its
-  own total and prints the drift (about −4% here, from rows whose model this
-  tool cannot identify). A model missing from the table is reported as
-  unpriced, never as free.
-- **Coverage** — reports say when the oldest transcript starts. Days before
-  that are unmeasured, not idle, and days with commits but no session log are
-  named explicitly.
+  Streamed rows are folded by `requestId` across every file, so a resumed or
+  forked session is not billed twice. `timetop prices --check` replays the
+  sessions where Claude Code recorded its own total and prints the drift
+  (−3.7% here: calls Claude Code billed but wrote no assistant row for). A
+  model missing from the table is reported as unpriced, with its token volume,
+  never as free.
+- **Coverage** — reports say when the oldest transcript starts. Days before it
+  read as `no data`, not as an idle `—`, and days with commits but no session
+  log are named explicitly.
 
-The scan is cached in `~/.config/timetop/state/cache.json`, keyed by file size
-and mtime, so a rescan of an unchanged transcript costs nothing.
+The scan is cached under `~/.config/timetop/state/` — one file per cache
+format, keyed by transcript size, mtime, the idle gap, your timezone and your
+aliases — so a rescan of an unchanged transcript costs nothing and a changed
+setting is never served from a stale answer.
 
 ## Sharing a report
 

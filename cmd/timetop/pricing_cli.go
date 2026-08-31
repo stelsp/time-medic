@@ -21,7 +21,8 @@ import (
 var (
 	catalogAnchor = []byte("schema_version:1,pricing_tiers:")
 	tierRe        = regexp.MustCompile(`([a-z0-9_]+):\{input:([0-9.]+),output:([0-9.]+),cache_write_5m:([0-9.]+),cache_write_1h:([0-9.]+),cache_read:([0-9.]+),web_search:([0-9.]+)\}`)
-	modelRe       = regexp.MustCompile(`(?s)\{id:"([^"]+)",family:"[^"]+",display_name:"[^"]+".*?pricing:"([a-z0-9_]+)"`)
+	modelHead     = regexp.MustCompile(`\{id:"([^"]+)",family:"[^"]+",display_name:"[^"]+"`)
+	pricingRe     = regexp.MustCompile(`pricing:"([a-z0-9_]+)"`)
 )
 
 // catalogWindow is how much of the binary after the anchor holds the catalog;
@@ -138,9 +139,11 @@ func scanCatalog(bin string) (map[string]Rates, error) {
 		if i := bytes.Index(window, catalogAnchor); i >= 0 {
 			seg := window[i:]
 			if len(seg) < catalogWindow {
-				// the catalog straddles the end of the file: read the rest
-				rest, _ := io.ReadAll(f)
-				seg = append(append([]byte{}, seg...), rest...)
+				// the catalog straddles a chunk boundary: read exactly enough
+				// more to cover the window, never the rest of the binary
+				more := make([]byte, catalogWindow-len(seg))
+				n, _ := io.ReadFull(f, more)
+				seg = append(append([]byte{}, seg...), more[:n]...)
 			}
 			return parseCatalog(seg)
 		}
@@ -177,10 +180,20 @@ func parseCatalog(seg []byte) (map[string]Rates, error) {
 	if len(tiers) == 0 {
 		return nil, fmt.Errorf("price catalog found but no tiers parsed")
 	}
+	// each model is parsed inside its own slice, so a model without a pricing
+	// field cannot borrow the next model's tier
 	rates := map[string]Rates{}
-	for _, m := range modelRe.FindAllStringSubmatch(text, -1) {
-		if r, ok := tiers[m[2]]; ok {
-			rates[m[1]] = r
+	heads := modelHead.FindAllStringSubmatchIndex(text, -1)
+	for i, h := range heads {
+		end := len(text)
+		if i+1 < len(heads) {
+			end = heads[i+1][0]
+		}
+		id := text[h[2]:h[3]]
+		if m := pricingRe.FindStringSubmatch(text[h[0]:end]); m != nil {
+			if r, ok := tiers[m[1]]; ok {
+				rates[id] = r
+			}
 		}
 	}
 	if len(rates) == 0 {

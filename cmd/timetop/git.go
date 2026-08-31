@@ -3,17 +3,53 @@
 package main
 
 import (
+	"fmt"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
+// git answers are memoized for the lifetime of the process: the dashboard
+// rebuilds a report on every frame, and forking git per project per frame
+// makes the UI stutter for seconds. Transcript rescans pick up new commits.
+var (
+	gitCacheMu sync.Mutex
+	gitCache   = map[string]any{}
+)
+
+func gitMemoized[T any](key string, compute func() T) T {
+	gitCacheMu.Lock()
+	if v, ok := gitCache[key]; ok {
+		gitCacheMu.Unlock()
+		return v.(T)
+	}
+	gitCacheMu.Unlock()
+	out := compute()
+	gitCacheMu.Lock()
+	gitCache[key] = out
+	gitCacheMu.Unlock()
+	return out
+}
+
+// gitForget drops the memo so a rescan sees commits made since the last one.
+func gitForget() {
+	gitCacheMu.Lock()
+	gitCache = map[string]any{}
+	gitCacheMu.Unlock()
+}
+
 // commitsIn returns the user's commits in a repo within [from, to).
 func commitsIn(root, author string, from, to time.Time) []Commit {
+	return gitMemoized(fmt.Sprintf("in|%s|%s|%d|%d", root, author, from.Unix(), to.Unix()),
+		func() []Commit { return commitsInUncached(root, author, from, to) })
+}
+
+func commitsInUncached(root, author string, from, to time.Time) []Commit {
 	args := []string{"-C", root, "log", "--all", "--no-merges",
-		"--since=" + from.Format(time.RFC3339), "--until=" + to.Format(time.RFC3339),
+		"--since=" + from.Format(time.RFC3339), "--until=" + to.Add(-time.Second).Format(time.RFC3339),
 		"--pretty=%H%x1f%at%x1f%s"}
 	if author != "" {
 		args = append(args, "--author="+author)
@@ -39,35 +75,35 @@ func commitsIn(root, author string, from, to time.Time) []Commit {
 // gitAuthor falls back to the repo's configured identity when the config file
 // does not pin one, so "my commits" means mine out of the box.
 func gitAuthor(root string) string {
-	out, err := exec.Command("git", "-C", root, "config", "user.email").Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
+	return gitMemoized("author|"+root, func() string {
+		out, err := exec.Command("git", "-C", root, "config", "user.email").Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	})
 }
 
 // mainRef is the integration branch a task branch is measured against.
 func mainRef(root string) string {
-	if v, ok := mainRefs[root]; ok {
-		return v
-	}
-	ref := ""
-	for _, cand := range []string{"origin/main", "origin/master", "main", "master"} {
-		if exec.Command("git", "-C", root, "rev-parse", "--verify", "--quiet", cand).Run() == nil {
-			ref = cand
-			break
+	return gitMemoized("mainref|"+root, func() string {
+		for _, cand := range []string{"origin/main", "origin/master", "main", "master"} {
+			if exec.Command("git", "-C", root, "rev-parse", "--verify", "--quiet", cand).Run() == nil {
+				return cand
+			}
 		}
-	}
-	mainRefs[root] = ref
-	return ref
+		return ""
+	})
 }
-
-var mainRefs = map[string]string{}
 
 // branchExists guards every branch-scoped query: worktrees come and go.
 func branchExists(root, branch string) bool {
-	return branch != "" &&
-		exec.Command("git", "-C", root, "rev-parse", "--verify", "--quiet", branch).Run() == nil
+	if branch == "" {
+		return false
+	}
+	return gitMemoized("exists|"+root+"|"+branch, func() bool {
+		return exec.Command("git", "-C", root, "rev-parse", "--verify", "--quiet", branch).Run() == nil
+	})
 }
 
 // branchMerged reports whether the branch already landed on the integration
@@ -77,6 +113,10 @@ func branchMerged(root, branch string) bool {
 	if ref == "" || !branchExists(root, branch) {
 		return false
 	}
+	return gitMemoized("merged|"+root+"|"+branch, func() bool { return branchMergedUncached(root, branch, ref) })
+}
+
+func branchMergedUncached(root, branch, ref string) bool {
 	out, err := exec.Command("git", "-C", root, "merge-base", "--is-ancestor", branch, ref).CombinedOutput()
 	return err == nil && len(out) == 0
 }
@@ -85,6 +125,11 @@ func branchMerged(root, branch string) bool {
 // period. An unmerged branch is asked for its own commits only (^main), so a
 // task shows its own work and not the trunk it was cut from.
 func commitsOnBranch(root, branch, author string, from, to time.Time) []Commit {
+	return gitMemoized(fmt.Sprintf("br|%s|%s|%s|%d|%d", root, branch, author, from.Unix(), to.Unix()),
+		func() []Commit { return commitsOnBranchUncached(root, branch, author, from, to) })
+}
+
+func commitsOnBranchUncached(root, branch, author string, from, to time.Time) []Commit {
 	if !branchExists(root, branch) {
 		// the branch was merged and deleted: its work still exists somewhere,
 		// findable by the issue it referenced
@@ -98,7 +143,7 @@ func commitsOnBranch(root, branch, author string, from, to time.Time) []Commit {
 		rev = append(rev, "^"+ref)
 	}
 	args := append([]string{"-C", root, "log", "--no-merges",
-		"--since=" + from.Format(time.RFC3339), "--until=" + to.Format(time.RFC3339),
+		"--since=" + from.Format(time.RFC3339), "--until=" + to.Add(-time.Second).Format(time.RFC3339),
 		"--pretty=%H%x1f%at%x1f%s"}, rev...)
 	if author != "" {
 		args = append(args, "--author="+author)
@@ -147,14 +192,17 @@ func taskRef(branch string, commits []Commit) string {
 }
 
 var (
-	refPattern = regexp.MustCompile(`(?:^|[^0-9])([0-9]{1,6})(?:-|$)`)
+	// a branch names an issue when a work-type prefix is followed by a number
+	// (feat-116, fix/2043, task_7) — a date or a version in a branch name is
+	// not an issue, and folding those together would invent tasks
+	refPattern = regexp.MustCompile(`(?i)(?:^|[-_/])(?:feat|feature|fix|bug|bugfix|hotfix|issue|task|chore|story|mr|pr)[-_/#]?([0-9]{1,6})(?:$|[-_/])`)
 	hashRef    = regexp.MustCompile(`#([0-9]{1,6})`)
 )
 
 // commitsByRef finds a deleted branch's work by the issue it named.
 func commitsByRef(root, ref, author string, from, to time.Time) []Commit {
 	args := []string{"-C", root, "log", "--all", "--no-merges",
-		"--since=" + from.Format(time.RFC3339), "--until=" + to.Format(time.RFC3339),
+		"--since=" + from.Format(time.RFC3339), "--until=" + to.Add(-time.Second).Format(time.RFC3339),
 		"--fixed-strings", "--grep=" + ref, "--pretty=%H%x1f%at%x1f%s"}
 	if author != "" {
 		args = append(args, "--author="+author)

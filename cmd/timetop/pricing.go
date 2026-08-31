@@ -73,21 +73,41 @@ func (pt PriceTable) Cost(bucket string, t Tokens) (float64, bool) {
 }
 
 func (pt PriceTable) ratesFor(model, speed string) (Rates, bool) {
+	model = canonicalModel(model)
 	if speed == "fast" {
 		if r, ok := fastRates[model]; ok {
 			return r, true
+		}
+		for id, r := range fastRates {
+			if strings.HasPrefix(model, id) {
+				return r, true
+			}
 		}
 	}
 	if r, ok := pt.rates[model]; ok {
 		return r, true
 	}
-	best, bestLen := Rates{}, 0
+	// only a longer id extending the reported one is a safe match: a truncated
+	// id could match several families whose rates differ threefold
+	best, bestID := Rates{}, ""
 	for id, r := range pt.rates {
-		if len(id) > bestLen && (strings.HasPrefix(model, id) || strings.HasPrefix(id, model)) {
-			best, bestLen = r, len(id)
+		if !strings.HasPrefix(model, id) {
+			continue
+		}
+		if len(id) > len(bestID) || (len(id) == len(bestID) && id < bestID) {
+			best, bestID = r, id
 		}
 	}
-	return best, bestLen > 0
+	return best, bestID != ""
+}
+
+// canonicalModel strips the context-window suffix the CLI appends to a model
+// id ("claude-opus-5[1m]"), which is a billing hint, not a different model.
+func canonicalModel(model string) string {
+	if i := strings.IndexByte(model, '['); i > 0 {
+		return model[:i]
+	}
+	return model
 }
 
 // Models lists the priced models, for `timetop prices`.
