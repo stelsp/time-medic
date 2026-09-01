@@ -8,7 +8,12 @@
  *   4. Happy with the plan? Run `apply`
  *
  * It never deletes anything. Moving an event keeps it — it only changes which
- * calendar owns it.
+ * calendar owns it, and marking one free only changes whether it blocks your
+ * availability for other people.
+
+ * Recurring events are handled as a series: moving or freeing one occurrence
+ * applies to the whole series, which is what you want for a daily standup or a
+ * twice-a-day pill reminder.
  */
 
 // ── what goes where ─────────────────────────────────────────────────────────
@@ -73,17 +78,22 @@ function run(dry) {
         return; // the moved event keeps its own availability
       }
 
-      // 3. availability: private blocks should not read as busy to others
-      if (matchesAny(title, FREE_PATTERNS) &&
-          event.getMyStatus() !== CalendarApp.GuestStatus.NO &&
-          event.isAllDayEvent() === false) {
+      // 3. availability: a private block should not read as busy to colleagues.
+      // free/busy is `transparency`, which only the advanced service can set —
+      // CalendarApp's visibility is a different thing (who may see the event).
+      if (matchesAny(title, FREE_PATTERNS) && !event.isAllDayEvent()) {
         try {
-          if (event.getVisibility() !== CalendarApp.Visibility.PRIVATE) {
+          var id = event.getId().split('@')[0];
+          var raw = Calendar.Events.get(calendarId(calendars[name]), id);
+          if (raw.transparency !== 'transparent') {
             Logger.log((dry ? 'would free' : 'free') + ' "' + title + '"');
-            if (!dry) event.setVisibility(CalendarApp.Visibility.PRIVATE);
+            if (!dry) {
+              Calendar.Events.patch({ transparency: 'transparent' },
+                calendarId(calendars[name]), id);
+            }
             freed++;
           }
-        } catch (e) { Logger.log('cannot change "' + title + '": ' + e); }
+        } catch (e) { Logger.log('cannot free "' + title + '": ' + e); }
       }
     });
   });
