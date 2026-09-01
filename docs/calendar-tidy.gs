@@ -34,6 +34,14 @@ var COLORS = {
 // stays where the invitation landed.
 var EVENT_COLOR = { work: '7', cats: '5', personal: '1' }; // Peacock, Banana, Lavender
 
+// Hand overrides, applied last and to every event whatever calendar it sits
+// in: some meetings are not what their name suggests. Colour ids are Google's
+// event palette - 1 Lavender, 5 Banana, 7 Peacock, 8 Graphite, 11 Tomato.
+var OVERRIDES = [
+  { patterns: [/achetut/i], color: '8' },  // Graphite: on the calendar, not on the clock
+  { patterns: [/ensemble/i], color: '7' }, // Peacock: work after all
+];
+
 // an event whose title matches moves to that calendar
 // Cyrillic is written as escapes on purpose: this file travels through
 // clipboards and editors that mangle encodings, and a broken pattern would
@@ -149,7 +157,25 @@ function run(dry) {
     }
   });
 
-  Logger.log('--- ' + (dry ? 'PREVIEW' : 'APPLIED') + ': ' +
+  // hand overrides win over everything decided above
+  var overridden = 0;
+  Object.keys(series).forEach(function (key) {
+    var s = series[key];
+    for (var i = 0; i < OVERRIDES.length; i++) {
+      if (!matchesAny(s.title, OVERRIDES[i].patterns)) continue;
+      Logger.log((dry ? 'would paint' : 'paint') + ' "' + s.title + '" color ' + OVERRIDES[i].color);
+      if (!dry) {
+        try {
+          Calendar.Events.patch({ colorId: OVERRIDES[i].color },
+            calendarId(calendars[s.calendar]), s.id);
+        } catch (e) { Logger.log('  ! could not paint "' + s.title + '": ' + e); failed++; break; }
+      }
+      overridden++;
+      break;
+    }
+  });
+
+  Logger.log('--- ' + (dry ? 'PREVIEW' : 'APPLIED') + ': ' + overridden + ' overridden, ' +
     Object.keys(series).length + ' series, ' + moved + ' to move, ' +
     freed + ' to mark free, ' + painted + ' painted in place, ' +
     kept + ' already right, ' + failed + ' failed ---');
