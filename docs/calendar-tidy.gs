@@ -32,15 +32,32 @@ var COLORS = {
 // Google refuses to change the organizer's copy. Painting it with the target
 // calendar's colour is the next best thing: it reads as work at a glance and
 // stays where the invitation landed.
-var EVENT_COLOR = { work: '7', cats: '5', personal: '1' }; // Peacock, Banana, Lavender
+// Painting goes through the event object, not through an id: an invitation
+// copy has an id the API refuses to look up ("Not Found"), but the object in
+// hand paints fine.
+var EVENT_COLOR = {
+  work: CalendarApp.EventColor.CYAN,       // Peacock
+  cats: CalendarApp.EventColor.YELLOW,     // Banana
+  personal: CalendarApp.EventColor.PALE_BLUE, // Lavender
+  graphite: CalendarApp.EventColor.GRAY,
+};
+
+// paints one event, or its whole series when it repeats
+function paint(event, color) {
+  if (event.isRecurringEvent()) {
+    event.getEventSeries().setColor(color);
+  } else {
+    event.setColor(color);
+  }
+}
 
 // Hand overrides, applied last and to every event whatever calendar it sits
 // in: some meetings are not what their name suggests. Colour ids are Google's
 // event palette - 1 Lavender, 5 Banana, 7 Peacock, 8 Graphite, 11 Tomato.
 var OVERRIDES = [
-  { patterns: [/achetut/i], color: '8' },  // Graphite: on the calendar, not on the clock
-  { patterns: [/ensomble|ensemble/i], color: '7' }, // Peacock: work after all
-  { patterns: [/kuzbass/i], color: '7' },           // Peacock
+  { patterns: [/achetut/i], color: 'graphite' }, // on the calendar, not on the clock
+  { patterns: [/ensomble|ensemble/i], color: 'work' },
+  { patterns: [/kuzbass/i], color: 'work' },
 ];
 
 // an event whose title matches moves to that calendar
@@ -103,6 +120,7 @@ function run(dry) {
         calendar: name,
         count: 1,
         target: targetFor(title, event),
+        ref: event,
         free: matchesAny(title, FREE_PATTERNS) && !event.isAllDayEvent(),
       };
     });
@@ -127,7 +145,7 @@ function run(dry) {
           var color = EVENT_COLOR[s.target];
           if (color) {
             try {
-              Calendar.Events.patch({ colorId: color }, calendarId(calendars[s.calendar]), s.id);
+              paint(s.ref, color);
               Logger.log('  cannot move an invitation - painted it ' + s.target + ' instead');
               painted++;
             } catch (e2) { Logger.log('  ! could not paint: ' + e2); failed++; }
@@ -167,12 +185,10 @@ function run(dry) {
     var s = series[key];
     for (var i = 0; i < OVERRIDES.length; i++) {
       if (!matchesAny(s.title, OVERRIDES[i].patterns)) continue;
-      Logger.log((dry ? 'would paint' : 'paint') + ' "' + s.title + '" color ' + OVERRIDES[i].color);
+      Logger.log((dry ? 'would paint' : 'paint') + ' "' + s.title + '" as ' + OVERRIDES[i].color);
       if (!dry) {
-        try {
-          Calendar.Events.patch({ colorId: OVERRIDES[i].color },
-            calendarId(calendars[s.calendar]), s.id);
-        } catch (e) { Logger.log('  ! could not paint "' + s.title + '": ' + e); failed++; break; }
+        try { paint(s.ref, EVENT_COLOR[OVERRIDES[i].color]); }
+        catch (e) { Logger.log('  ! could not paint "' + s.title + '": ' + e); failed++; break; }
       }
       overridden++;
       break;
