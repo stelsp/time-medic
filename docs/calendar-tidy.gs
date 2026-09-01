@@ -62,47 +62,68 @@ function run(dry) {
 
   var from = new Date(Date.now() - DAYS_BACK * 864e5);
   var to = new Date(Date.now() + DAYS_AHEAD * 864e5);
-  var moved = 0, freed = 0, seen = 0;
 
+  // 2. collect SERIES, not occurrences. A pill taken twice a day for four
+  // months is one decision, not two hundred; moving or freeing it once moves
+  // or frees every occurrence with it.
+  var series = {}; // key -> {id, title, calendar, count, target, free}
   Object.keys(calendars).forEach(function (name) {
     calendars[name].getEvents(from, to).forEach(function (event) {
-      seen++;
+      var id = event.getId().split('@')[0];
+      var key = name + '|' + id;
+      if (series[key]) { series[key].count++; return; }
       var title = event.getTitle();
-      var target = targetFor(title, event);
-
-      // 2. triage: an event in the wrong calendar moves to the right one
-      if (target && target !== name && calendars[target]) {
-        Logger.log((dry ? 'would move' : 'move') + ' "' + title + '"  ' + name + '  ' + target);
-        if (!dry) {
-          Calendar.Events.move(calendarId(calendars[name]), event.getId().split('@')[0],
-            calendarId(calendars[target]));
-        }
-        moved++;
-        return; // the moved event keeps its own availability
-      }
-
-      // 3. availability: a private block should not read as busy to colleagues.
-      // free/busy is `transparency`, which only the advanced service can set -
-      // CalendarApp's visibility is a different thing (who may see the event).
-      if (matchesAny(title, FREE_PATTERNS) && !event.isAllDayEvent()) {
-        try {
-          var id = event.getId().split('@')[0];
-          var raw = Calendar.Events.get(calendarId(calendars[name]), id);
-          if (raw.transparency !== 'transparent') {
-            Logger.log((dry ? 'would free' : 'free') + ' "' + title + '"');
-            if (!dry) {
-              Calendar.Events.patch({ transparency: 'transparent' },
-                calendarId(calendars[name]), id);
-            }
-            freed++;
-          }
-        } catch (e) { Logger.log('cannot free "' + title + '": ' + e); }
-      }
+      series[key] = {
+        id: id,
+        title: title,
+        calendar: name,
+        count: 1,
+        target: targetFor(title, event),
+        free: matchesAny(title, FREE_PATTERNS) && !event.isAllDayEvent(),
+      };
     });
   });
 
-  Logger.log('--- ' + (dry ? 'PREVIEW' : 'APPLIED') + ': ' + seen + ' events seen, ' +
-    moved + ' to move, ' + freed + ' to mark private ---');
+  var moved = 0, freed = 0, kept = 0, failed = 0;
+  Object.keys(series).forEach(function (key) {
+    var s = series[key];
+    var where = ' (' + s.count + (s.count === 1 ? ' event)' : ' occurrences)');
+
+    if (s.target && s.target !== s.calendar && calendars[s.target]) {
+      Logger.log((dry ? 'would move' : 'move') + ' "' + s.title + '"  ' +
+        s.calendar + ' -> ' + s.target + where);
+      if (!dry) {
+        try {
+          Calendar.Events.move(calendarId(calendars[s.calendar]), s.id,
+            calendarId(calendars[s.target]));
+        } catch (e) { Logger.log('  ! could not move: ' + e); failed++; return; }
+      }
+      moved++;
+      s.calendar = s.target; // freeing below must patch it where it lives now
+    } else {
+      kept++;
+    }
+
+    // 3. free/busy: a private block should not read as busy to colleagues.
+    // This is `transparency`, which only the advanced service can set.
+    if (s.free) {
+      try {
+        var raw = Calendar.Events.get(calendarId(calendars[s.calendar]), s.id);
+        if (raw.transparency !== 'transparent') {
+          Logger.log((dry ? 'would free' : 'free') + ' "' + s.title + '"' + where);
+          if (!dry) {
+            Calendar.Events.patch({ transparency: 'transparent' },
+              calendarId(calendars[s.calendar]), s.id);
+          }
+          freed++;
+        }
+      } catch (e) { Logger.log('  ! could not free "' + s.title + '": ' + e); failed++; }
+    }
+  });
+
+  Logger.log('--- ' + (dry ? 'PREVIEW' : 'APPLIED') + ': ' +
+    Object.keys(series).length + ' series, ' + moved + ' to move, ' +
+    freed + ' to mark free, ' + kept + ' already in place, ' + failed + ' failed ---');
 }
 
 function targetFor(title, event) {
