@@ -89,8 +89,13 @@ type Activity struct {
 	Tasks   map[string]map[minute]bool // project\x1fbranch -> active minutes
 	// Agent holds the minutes that came from unattended runs (a bot calling
 	// claude -p), so a report can separate your hours from your robots'.
-	Agent  map[minute]bool
-	Human  map[minute]bool
+	Agent map[minute]bool
+	Human map[minute]bool
+	// Apps holds the minutes the keyboard sensor saw, by application. They
+	// prove presence, not project: the transcripts say what was worked on.
+	Apps map[string]map[minute]bool
+	// Events are calendar entries — the work that leaves no keystroke.
+	Events []Event
 	Roots  map[string]string // project -> a real checkout path
 	Tokens map[string]map[string]*Tokens
 	// First is the oldest minute on record: nothing before it can be reported.
@@ -145,6 +150,7 @@ func Scan(cfg Config) (*Activity, error) {
 		Tasks:   map[string]map[minute]bool{},
 		Agent:   map[minute]bool{},
 		Human:   map[minute]bool{},
+		Apps:    map[string]map[minute]bool{},
 		Roots:   map[string]string{},
 		Tokens:  map[string]map[string]*Tokens{},
 	}
@@ -209,6 +215,18 @@ func Scan(cfg Config) (*Activity, error) {
 	}
 	for proj, votes := range rootVotes {
 		act.Roots[proj] = bestRoot(votes)
+	}
+	if apps, err := ReadSamples(cfg); err == nil {
+		act.Apps = apps
+	}
+	if cfg.Calendar {
+		// one window, cached: reports slice their own period out of it
+		now := time.Now()
+		if events, err := CalendarEvents(cfg, now.AddDate(0, 0, -90), now.AddDate(0, 0, 1)); err == nil {
+			act.Events = events
+		} else {
+			fmt.Fprintln(os.Stderr, err)
+		}
 	}
 	for _, set := range act.Minutes {
 		for m := range set {

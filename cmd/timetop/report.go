@@ -56,20 +56,25 @@ type TaskStat struct {
 
 type Report struct {
 	Period
-	TotalMins int // wall clock: minutes worked at all, overlaps counted once
-	AgentMins int // of those, minutes that only an unattended run was awake for
-	SumMins   int // sum over projects; larger than TotalMins when work overlaps
-	Days      []DayStat
-	Projects  []ProjStat
-	Sessions  []Session
-	Tasks     []TaskStat
-	Tokens    map[string]*Tokens // model -> tokens burned in the period
-	Prices    PriceTable         // whatever price list the config points at
-	Cost      map[string]float64 // model -> dollars, only for priced models
-	CostTotal float64
-	Unpriced  []string // models seen but absent from the price table
-	PrevMins  int      // wall clock of the period before this one
-	Gap       int
+	TotalMins   int            // wall clock: minutes any source can prove, overlaps counted once
+	AgentMins   int            // of those, minutes that only an unattended run was awake for
+	SessionMins int            // minutes a Claude Code session can account for
+	AppMins     map[string]int // minutes at the keyboard, by application
+	AppTotal    int            // their union: time at this machine, whatever the app
+	MeetingMins int            // minutes the calendar accounts for
+	Meetings    []Event        // the meetings themselves, in order
+	SumMins     int            // sum over projects; larger than TotalMins when work overlaps
+	Days        []DayStat
+	Projects    []ProjStat
+	Sessions    []Session
+	Tasks       []TaskStat
+	Tokens      map[string]*Tokens // model -> tokens burned in the period
+	Prices      PriceTable         // whatever price list the config points at
+	Cost        map[string]float64 // model -> dollars, only for priced models
+	CostTotal   float64
+	Unpriced    []string // models seen but absent from the price table
+	PrevMins    int      // wall clock of the period before this one
+	Gap         int
 	// CoverageFrom is the oldest minute any transcript can prove.
 	CoverageFrom time.Time
 }
@@ -181,6 +186,55 @@ func Build(act *Activity, cfg Config, p Period) Report {
 		flush(start, prev)
 	}
 
+	rep.SessionMins = len(wall)
+
+	// the keyboard sensor proves presence the transcripts cannot: reading,
+	// reviewing, meetings, anything that is not a session
+	rep.AppMins = map[string]int{}
+	appWall := map[minute]bool{}
+	for app, set := range act.Apps {
+		n := 0
+		for m := range set {
+			t := time.Unix(int64(m)*60, 0)
+			if t.Before(p.From) || !t.Before(p.To) {
+				continue
+			}
+			n++
+			if !appWall[m] {
+				appWall[m] = true
+			}
+			if !wall[m] {
+				wall[m] = true
+				dayWall[t.Format("2006-01-02")]++
+			}
+		}
+		if n > 0 {
+			rep.AppMins[app] = n
+		}
+	}
+	rep.AppTotal = len(appWall)
+
+	// meetings are worked time even when nobody touched a key
+	meetWall := map[minute]bool{}
+	for _, e := range act.Events {
+		if !e.Meeting(cfg.MeetingMinutes) || !e.End.After(p.From) || !e.Start.Before(p.To) {
+			continue
+		}
+		rep.Meetings = append(rep.Meetings, e)
+		for _, m := range e.Minutes() {
+			t := time.Unix(int64(m)*60, 0)
+			if t.Before(p.From) || !t.Before(p.To) {
+				continue
+			}
+			meetWall[m] = true
+			if !wall[m] {
+				wall[m] = true
+				dayWall[t.Format("2006-01-02")]++
+			}
+		}
+	}
+	rep.MeetingMins = len(meetWall)
+	sort.Slice(rep.Meetings, func(i, j int) bool { return rep.Meetings[i].Start.Before(rep.Meetings[j].Start) })
 	rep.TotalMins = len(wall)
 
 	author := cfg.Author
@@ -443,6 +497,9 @@ func RenderWeekly(rep Report, md bool) string {
 		rep.From.Format("Mon Jan 2"), rep.To.AddDate(0, 0, -1).Format("Mon Jan 2"))
 	fmt.Fprintf(&b, "%s · %d active days · %d sessions · avg %s/day · %d commits\n",
 		hm(rep.TotalMins), active, len(rep.Sessions), hm(avg), totalCommits)
+	if line := rep.SourceLine(); line != "" {
+		fmt.Fprintf(&b, "%s\n", line)
+	}
 	if rep.SumMins > rep.TotalMins {
 		fmt.Fprintf(&b, "%s across projects (%s of it in parallel sessions)\n",
 			hm(rep.SumMins), hm(rep.SumMins-rep.TotalMins))
@@ -501,6 +558,33 @@ func RenderWeekly(rep Report, md bool) string {
 	}
 	fmt.Fprint(&b, post(md)+"\n")
 
+	if len(rep.Meetings) > 0 {
+		fmt.Fprintf(&b, "%sMEETINGS\n%s", h2, pre(md))
+		for _, e := range rep.Meetings {
+			label := e.Calendar
+			if e.Title != "" {
+				label = e.Title
+			}
+			fmt.Fprintf(&b, "%s  %s–%s %8s  %s\n", e.Start.Format("Mon 02"),
+				e.Start.Format("15:04"), e.End.Format("15:04"),
+				hm(int(e.End.Sub(e.Start).Minutes())), trunc(label, 40))
+		}
+		fmt.Fprintf(&b, "%s in meetings\n", hm(rep.MeetingMins))
+		fmt.Fprint(&b, post(md)+"\n")
+	}
+
+	if len(rep.AppMins) > 0 {
+		fmt.Fprintf(&b, "%sAT THE KEYBOARD\n%s", h2, pre(md))
+		apps := rep.AppsRanked()
+		for _, a := range apps {
+			fmt.Fprintf(&b, "%-24s %-12s %8s\n", trunc(a.Name, 24),
+				bar(a.Mins, apps[0].Mins, 12), hm(a.Mins))
+		}
+		fmt.Fprintf(&b, "%s at this machine, %s of it inside a Claude Code session\n",
+			hm(rep.AppTotal), hm(rep.SessionMins))
+		fmt.Fprint(&b, post(md)+"\n")
+	}
+
 	fmt.Fprintf(&b, "%sSHIPPED\n", h2)
 	for _, p := range rep.Projects {
 		if len(p.Commits) == 0 {
@@ -534,6 +618,9 @@ func RenderDaily(rep Report, md bool) string {
 	d := rep.Days[0]
 	fmt.Fprintf(&b, "%s · %s–%s · %d sessions\n", hm(rep.TotalMins),
 		d.First.Format("15:04"), d.Last.Format("15:04"), len(rep.Sessions))
+	if line := rep.SourceLine(); line != "" {
+		fmt.Fprintf(&b, "%s\n", line)
+	}
 	if rep.SumMins > rep.TotalMins {
 		fmt.Fprintf(&b, "%s across projects (%s of it in parallel sessions)\n",
 			hm(rep.SumMins), hm(rep.SumMins-rep.TotalMins))
@@ -851,4 +938,45 @@ func (r Report) SpendLine() string {
 			compact(unpriced.Total()), strings.Join(short, ", "))
 	}
 	return line
+}
+
+// AppRow is one application's share of the time at the keyboard.
+type AppRow struct {
+	Name string
+	Mins int
+}
+
+// AppsRanked lists applications longest-first, folded into categories when the
+// config names any.
+func (r Report) AppsRanked() []AppRow {
+	out := make([]AppRow, 0, len(r.AppMins))
+	for name, mins := range r.AppMins {
+		out = append(out, AppRow{name, mins})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Mins != out[j].Mins {
+			return out[i].Mins > out[j].Mins
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+// SourceLine says which sensor proved the total, because the two answer
+// different questions: one knows the project, the other only that you were here.
+func (r Report) SourceLine() string {
+	switch {
+	case r.AppTotal == 0 && r.MeetingMins == 0:
+		return "" // no other sensor is running; sessions are all we know
+	case r.SessionMins == 0:
+		return fmt.Sprintf("all of it from the keyboard sensor — no Claude Code session in this period")
+	}
+	parts := []string{hm(r.SessionMins) + " in Claude Code sessions"}
+	if outside := r.AppTotal - r.SessionMins; outside > 0 {
+		parts = append(parts, hm(outside)+" elsewhere at the keyboard")
+	}
+	if r.MeetingMins > 0 {
+		parts = append(parts, hm(r.MeetingMins)+" in meetings")
+	}
+	return strings.Join(parts, " · ")
 }

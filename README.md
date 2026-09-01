@@ -12,14 +12,50 @@ weekly for you.
 
 ## What it does
 
-`timetop` reconstructs your working day from Claude Code session transcripts
-(`~/.claude/projects/**/*.jsonl`). Every entry is a timestamped proof of work
-at a known working directory; minutes between two nearby entries are counted as
-worked minutes, and a hole longer than the idle gap ends the session. Commits
-from the same repositories are attached on top, so a report says both how long
-you worked and what came out of it.
-
+`timetop` reconstructs your working day from evidence you already leave behind.
 Nothing is self-reported, so nothing depends on you remembering to press start.
+
+Three sensors, each answering a different question:
+
+| sensor | what it proves | permission |
+|--------|----------------|------------|
+| **Claude Code transcripts** (`~/.claude/projects/**/*.jsonl`) | work on a known project and branch, plus what it cost in tokens | none |
+| **the keyboard sensor** (`timetop watch`) | a human was at this machine, and which app they had in front | none |
+| **the calendar** (EventKit) | meetings — work that leaves no keystroke | one click, once |
+
+Minutes between two nearby signals count as worked minutes; a hole longer than
+the idle gap is a break. The three are unioned, so an hour spent in a call
+while a session is open is still one hour. Commits from the same repositories
+are attached on top, so a report says both how long you worked and what came
+out of it.
+
+### The keyboard sensor
+
+```
+timetop watch --install     start it, and keep it starting at login
+timetop watch --status      is it running?
+timetop watch --stop        stop it and remove the login agent
+```
+
+It writes one line every 30 seconds to `~/.config/timetop/state/samples.log`,
+mode `0600`:
+
+```
+1788254095|0|Ghostty
+```
+
+A timestamp, seconds since your last input, and the name of the app in front.
+No window titles, no keystrokes, no screen contents, and nothing leaves the
+machine. Stopping it leaves the samples it already wrote; delete the file to
+forget them.
+
+### Meetings
+
+Set `CALENDAR=1` and run `timetop calendar` once from your own terminal: macOS
+asks for calendar access, you click Allow, and from then on meetings count as
+worked time. Only the shape of an event is read — start, end, calendar name,
+head count — never titles, unless you set `CALENDAR_TITLES=1`. Events you
+declined, all-day markers and anything marked free are not counted.
 
 ```
 WEEK 2026-W35 · Mon Aug 24 – Sun Aug 30

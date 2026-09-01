@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -464,5 +465,87 @@ func TestUnpricedModelIsReportedNotSilentlyFree(t *testing.T) {
 	}
 	if len(rep.Unpriced) != 1 || rep.Unpriced[0] != "brand-new-model" {
 		t.Fatalf("unpriced models must be named: %v", rep.Unpriced)
+	}
+}
+
+func TestKeyboardMinutesJoinTheWallClockWithoutDoubleCounting(t *testing.T) {
+	base := time.Date(2026, 8, 26, 9, 0, 0, 0, time.Local).Unix() / 60
+	set := func(offsets ...int64) map[minute]bool {
+		m := map[minute]bool{}
+		for _, o := range offsets {
+			m[minute(base+o)] = true
+		}
+		return m
+	}
+	act := &Activity{
+		Minutes: map[string]map[minute]bool{"proj": set(0, 1)},
+		Tasks:   map[string]map[minute]bool{},
+		Roots:   map[string]string{},
+		// one minute overlaps the session, two are outside it
+		Apps: map[string]map[minute]bool{"Figma": set(1, 2, 3)},
+	}
+	rep := Build(act, Config{GapMinutes: 15}, Daily(time.Unix(base*60, 0)))
+	if rep.SessionMins != 2 {
+		t.Fatalf("session minutes: %d", rep.SessionMins)
+	}
+	if rep.AppTotal != 3 || rep.AppMins["Figma"] != 3 {
+		t.Fatalf("keyboard minutes: %d %v", rep.AppTotal, rep.AppMins)
+	}
+	if rep.TotalMins != 4 {
+		t.Fatalf("wall clock counts the overlap once: %d", rep.TotalMins)
+	}
+	if line := rep.SourceLine(); !strings.Contains(line, "2m in Claude Code") ||
+		!strings.Contains(line, "1m elsewhere") {
+		t.Fatalf("source line: %q", line)
+	}
+}
+
+func TestMeetingsCountEvenWithNobodyTyping(t *testing.T) {
+	start := time.Date(2026, 8, 26, 14, 0, 0, 0, time.Local)
+	act := &Activity{
+		Minutes: map[string]map[minute]bool{},
+		Tasks:   map[string]map[minute]bool{},
+		Roots:   map[string]string{},
+		Events: []Event{
+			{Start: start, End: start.Add(30 * time.Minute), Calendar: "Work", Busy: true, People: 4},
+			{Start: start, End: start.Add(24 * time.Hour), Calendar: "Work", Busy: true, AllDay: true},
+			{Start: start, End: start.Add(5 * time.Minute), Calendar: "Work", Busy: true},
+			{Start: start.Add(time.Hour), End: start.Add(2 * time.Hour), Calendar: "Work", Busy: false},
+		},
+	}
+	rep := Build(act, Config{GapMinutes: 15, MeetingMinutes: 10}, Daily(start))
+	if len(rep.Meetings) != 1 {
+		t.Fatalf("all-day markers, free time and five-minute slots are not meetings: %d", len(rep.Meetings))
+	}
+	if rep.MeetingMins != 30 || rep.TotalMins != 30 {
+		t.Fatalf("meeting minutes %d, wall clock %d", rep.MeetingMins, rep.TotalMins)
+	}
+}
+
+func TestSamplesBecomeMinutesOnlyWhileSomebodyIsThere(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{StateDir: dir, GapMinutes: 15, IdleSeconds: 180}
+	base := time.Date(2026, 8, 26, 9, 0, 0, 0, time.Local).Unix()
+	lines := fmt.Sprintf("%d|0|Ghostty\n%d|12|Ghostty\n%d|900|Ghostty\n%d|3|Figma\n",
+		base, base+60, base+120, base+180)
+	if err := os.WriteFile(cfg.SamplePath(), []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	apps, err := ReadSamples(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apps["Ghostty"]) != 2 {
+		t.Fatalf("the idle sample must not count: %d", len(apps["Ghostty"]))
+	}
+	if len(apps["Figma"]) != 1 {
+		t.Fatalf("Figma: %d", len(apps["Figma"]))
+	}
+}
+
+func TestReadSamplesWithoutASensorIsNotAnError(t *testing.T) {
+	apps, err := ReadSamples(Config{StateDir: t.TempDir()})
+	if err != nil || apps != nil {
+		t.Fatalf("a machine with no sensor simply has no samples: %v %v", apps, err)
 	}
 }

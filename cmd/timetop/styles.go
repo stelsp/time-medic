@@ -13,6 +13,7 @@ var (
 	bold    = lipgloss.NewStyle().Bold(true)
 	dim     = lipgloss.NewStyle().Faint(true)
 	green   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	blue    = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
 	amber   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	amberB  = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
 	borderC = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))

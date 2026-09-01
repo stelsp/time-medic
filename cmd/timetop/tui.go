@@ -225,7 +225,7 @@ func (m *model) move(d int) {
 // dayLines and taskLines bound the scroll offsets by what actually exists, so
 // overshooting the end does not cost hundreds of dead keypresses.
 func (m model) dayLines() int {
-	n := len(m.dayRep.Sessions) + len(m.dayRep.Tasks)
+	n := len(m.dayRep.Sessions) + len(m.dayRep.Tasks) + len(m.dayRep.Meetings) + len(m.dayRep.AppMins)
 	for _, p := range m.dayRep.Projects {
 		n += len(p.Commits)
 	}
@@ -281,6 +281,9 @@ func (m model) header() string {
 	spend := ""
 	if m.rep.CostTotal > 0 {
 		spend = "  " + green.Render(money(m.rep.CostTotal))
+	}
+	if m.rep.MeetingMins > 0 {
+		spend += dim.Render("  ") + blue.Render(hm(m.rep.MeetingMins)+" meetings")
 	}
 	left := amberB.Render(" ✦ time-medic ") + dim.Render(m.rep.Label+"  ") +
 		bold.Render(hm(m.rep.TotalMins)) + " " + gauge(m.rep.TotalMins, m.cfg.TargetHours, 12) +
@@ -481,6 +484,29 @@ func (m model) dayBody(rows int) string {
 		lines = append(lines, fmt.Sprintf(" %s–%s %8s  %s",
 			s.Start.Format("15:04"), s.End.Format("15:04"),
 			hm(int(s.End.Sub(s.Start).Minutes())), s.Project))
+	}
+	if len(day.Meetings) > 0 {
+		lines = append(lines, dim.Render(fmt.Sprintf(" ── meetings %d ──", len(day.Meetings))))
+		for _, e := range day.Meetings {
+			label := e.Calendar
+			if e.Title != "" {
+				label = e.Title
+			}
+			lines = append(lines, fmt.Sprintf(" %s–%s %8s  %s",
+				e.Start.Format("15:04"), e.End.Format("15:04"),
+				hm(int(e.End.Sub(e.Start).Minutes())), trunc(label, 40)))
+		}
+	}
+	if apps := day.AppsRanked(); len(apps) > 0 {
+		lines = append(lines, dim.Render(" ── at the keyboard ──"))
+		for i, a := range apps {
+			if i >= 6 {
+				lines = append(lines, dim.Render(fmt.Sprintf("  … +%d more apps", len(apps)-i)))
+				break
+			}
+			lines = append(lines, fmt.Sprintf(" %-24s %s %8s", trunc(a.Name, 24),
+				barC(a.Mins, apps[0].Mins, 10), hm(a.Mins)))
+		}
 	}
 	if len(day.Tasks) > 0 {
 		lines = append(lines, dim.Render(fmt.Sprintf(" ── tasks %d ──", len(day.Tasks))))

@@ -11,15 +11,21 @@ import (
 )
 
 type Config struct {
-	TranscriptDir string            // where Claude Code keeps session logs
-	GapMinutes    int               // idle gap that ends a work session
-	TargetHours   float64           // weekly target, drives the gauge
-	Author        string            // git author filter (email or name)
-	Aliases       map[string]string // raw project name -> reporting name
-	SlackWebhook  string            // incoming webhook, used only with --slack
-	Prices        string            // inline price table, dollars per Mtok
-	PricesFile    string            // path to a JSON price table (LiteLLM shape works)
-	StateDir      string
+	TranscriptDir  string            // where Claude Code keeps session logs
+	GapMinutes     int               // idle gap that ends a work session
+	TargetHours    float64           // weekly target, drives the gauge
+	Author         string            // git author filter (email or name)
+	Aliases        map[string]string // raw project name -> reporting name
+	SlackWebhook   string            // incoming webhook, used only with --slack
+	IdleSeconds    int               // input older than this means nobody was there
+	Calendar       bool              // read meetings from the calendar at all
+	CalendarTitles bool              // include event titles (off: only times and shape)
+	Calendars      []string          // only these calendars, empty means all
+	MeetingMinutes int               // shorter events are not counted as worked time
+	AppCategories  map[string]string // app name -> what that time is
+	Prices         string            // inline price table, dollars per Mtok
+	PricesFile     string            // path to a JSON price table (LiteLLM shape works)
+	StateDir       string
 }
 
 func configDir() string {
@@ -33,11 +39,14 @@ func configDir() string {
 func LoadConfig() Config {
 	home, _ := os.UserHomeDir()
 	cfg := Config{
-		TranscriptDir: filepath.Join(home, ".claude", "projects"),
-		GapMinutes:    15,
-		TargetHours:   40,
-		Aliases:       map[string]string{},
-		StateDir:      filepath.Join(configDir(), "state"),
+		TranscriptDir:  filepath.Join(home, ".claude", "projects"),
+		GapMinutes:     15,
+		TargetHours:    40,
+		IdleSeconds:    180,
+		MeetingMinutes: 10,
+		AppCategories:  map[string]string{},
+		Aliases:        map[string]string{},
+		StateDir:       filepath.Join(configDir(), "state"),
 	}
 	data, err := os.ReadFile(filepath.Join(configDir(), "config.env"))
 	if err != nil {
@@ -63,6 +72,31 @@ func LoadConfig() Config {
 		case "TARGET_HOURS":
 			if f, e := strconv.ParseFloat(val, 64); e == nil && f > 0 {
 				cfg.TargetHours = f
+			}
+		case "CALENDAR":
+			cfg.Calendar = val == "1" || strings.EqualFold(val, "true")
+		case "CALENDAR_TITLES":
+			cfg.CalendarTitles = val == "1" || strings.EqualFold(val, "true")
+		case "CALENDARS":
+			cfg.Calendars = nil
+			for _, name := range strings.Split(val, ",") {
+				if name = strings.TrimSpace(name); name != "" {
+					cfg.Calendars = append(cfg.Calendars, name)
+				}
+			}
+		case "MEETING_MINUTES":
+			if n, e := strconv.Atoi(val); e == nil && n >= 0 {
+				cfg.MeetingMinutes = n
+			}
+		case "IDLE_SECONDS":
+			if n, e := strconv.Atoi(val); e == nil && n > 0 {
+				cfg.IdleSeconds = n
+			}
+		case "APP_CATEGORIES": // "zoom.us:meeting,Slack:comms"
+			for _, pair := range strings.Split(val, ",") {
+				if app, cat, ok := strings.Cut(strings.TrimSpace(pair), ":"); ok {
+					cfg.AppCategories[app] = cat
+				}
 			}
 		case "GIT_AUTHOR":
 			cfg.Author = val

@@ -20,6 +20,10 @@ const usage = `timetop — autonomous time tracking from your work trail
   timetop daily [when]       when: today (default) | yesterday | YYYY-MM-DD
   timetop weekly [when]      when: this (default) | last | YYYY-MM-DD | -N weeks
   timetop tasks [when]       one line per branch: time, state, commits
+  timetop watch              run the keyboard sensor in the foreground
+  timetop watch --install    keep it running at login (launchd agent)
+  timetop watch --stop       stop it and remove the agent
+  timetop calendar [when]    the meetings a period contains (needs CALENDAR=1)
   timetop scan               refresh the cache and print what was found
   timetop prices             show the price table (from the claude CLI's own catalog)
   timetop prices --check     replay sessions and compare with Claude's own totals
@@ -90,6 +94,66 @@ func main() {
 	case "tasks", "t":
 		act := mustScan(cfg)
 		deliver(cfg, RenderTasks(Build(act, cfg, Weekly(parseWeek(when))), md || slack), out, slack)
+	case "watch":
+		switch when {
+		case "--install", "install":
+			if err := InstallDaemon(cfg); err != nil {
+				fmt.Fprintln(os.Stderr, "install:", err)
+				os.Exit(1)
+			}
+			fmt.Printf("sensor running and set to start at login\n"+
+				"it records one line every %s: timestamp, seconds since your last input,\n"+
+				"and the name of the app in front. Nothing else — no titles, no keystrokes.\n"+
+				"log: %s\n", sampleInterval, cfg.SamplePath())
+		case "--stop", "stop", "--uninstall":
+			if err := RemoveDaemon(); err != nil {
+				fmt.Fprintln(os.Stderr, "stop:", err)
+				os.Exit(1)
+			}
+			fmt.Println("sensor stopped; the samples it already wrote are kept")
+		case "--status", "status":
+			if DaemonLoaded() {
+				fmt.Println("sensor: running at login")
+			} else {
+				fmt.Println("sensor: not installed (timetop watch --install)")
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "sampling every %s — ctrl-c to stop\n", sampleInterval)
+			if err := Watch(cfg); err != nil {
+				fmt.Fprintln(os.Stderr, "watch:", err)
+				os.Exit(1)
+			}
+		}
+	case "calendar", "cal":
+		if !cfg.Calendar {
+			fmt.Printf("calendar reading is off — set CALENDAR=1 in %s\n"+
+				"the first read asks macOS for calendar access; times and calendar names\n"+
+				"are all that is stored, unless you also set CALENDAR_TITLES=1\n",
+				filepath.Join(configDir(), "config.env"))
+			return
+		}
+		p := Weekly(parseWeek(when))
+		events, err := CalendarEvents(cfg, p.From, p.To)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		total := 0
+		for _, e := range events {
+			mark := " "
+			if e.Meeting(cfg.MeetingMinutes) {
+				mark = "•"
+				total += int(e.End.Sub(e.Start).Minutes())
+			}
+			label := e.Calendar
+			if e.Title != "" {
+				label = e.Title
+			}
+			fmt.Printf("%s %s %s–%s %8s  %-28s %d people\n", mark, e.Start.Format("Mon 02 Jan"),
+				e.Start.Format("15:04"), e.End.Format("15:04"),
+				hm(int(e.End.Sub(e.Start).Minutes())), trunc(label, 28), e.People)
+		}
+		fmt.Printf("\n%d events, %s counted as worked time (• = counted)\n", len(events), hm(total))
 	case "prices":
 		pt := LoadPrices(cfg)
 		if when == "--check" || when == "check" {
