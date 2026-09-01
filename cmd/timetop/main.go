@@ -134,6 +134,10 @@ func main() {
 		}
 		p := Weekly(parseWeek(when))
 		events, err := CalendarEvents(cfg, p.From, p.To)
+		if len(events) == 0 && err == nil {
+			fmt.Println("no events in", p.Label)
+			return
+		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)

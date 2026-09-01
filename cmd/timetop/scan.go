@@ -95,9 +95,10 @@ type Activity struct {
 	// prove presence, not project: the transcripts say what was worked on.
 	Apps map[string]map[minute]bool
 	// Events are calendar entries — the work that leaves no keystroke.
-	Events []Event
-	Roots  map[string]string // project -> a real checkout path
-	Tokens map[string]map[string]*Tokens
+	Events      []Event
+	CalendarErr error             // why there are none, when the calendar was asked for
+	Roots       map[string]string // project -> a real checkout path
+	Tokens      map[string]map[string]*Tokens
 	// First is the oldest minute on record: nothing before it can be reported.
 	First time.Time
 }
@@ -222,10 +223,12 @@ func Scan(cfg Config) (*Activity, error) {
 	if cfg.Calendar {
 		// one window, cached: reports slice their own period out of it
 		now := time.Now()
+		// a refused calendar is not a scan failure: reports carry on without
+		// meetings, and `timetop calendar` is where the reason is shown
 		if events, err := CalendarEvents(cfg, now.AddDate(0, 0, -90), now.AddDate(0, 0, 1)); err == nil {
 			act.Events = events
 		} else {
-			fmt.Fprintln(os.Stderr, err)
+			act.CalendarErr = err
 		}
 	}
 	for _, set := range act.Minutes {
