@@ -1,13 +1,13 @@
 /**
- * Calendar tidy — colors, availability and triage, run from your own account.
+ * Calendar tidy - colors, availability and triage, run from your own account.
  *
  * How to use:
- *   1. script.google.com → New project → paste this file over the placeholder
- *   2. Services (+) → Google Calendar API → Add   (gives Calendar.Events.move)
+ *   1. script.google.com  New project  paste this file over the placeholder
+ *   2. Services (+)  Google Calendar API  Add   (gives Calendar.Events.move)
  *   3. Run `preview` first: it changes NOTHING and logs what it would do
  *   4. Happy with the plan? Run `apply`
  *
- * It never deletes anything. Moving an event keeps it — it only changes which
+ * It never deletes anything. Moving an event keeps it - it only changes which
  * calendar owns it, and marking one free only changes whether it blocks your
  * availability for other people.
 
@@ -16,7 +16,7 @@
  * twice-a-day pill reminder.
  */
 
-// ── what goes where ─────────────────────────────────────────────────────────
+//  what goes where 
 var COLORS = {
   work: CalendarApp.Color.CYAN,      // Peacock
   cats: CalendarApp.Color.YELLOW,    // Banana
@@ -26,22 +26,25 @@ var COLORS = {
 };
 
 // an event whose title matches moves to that calendar
+// Cyrillic is written as escapes on purpose: this file travels through
+// clipboards and editors that mangle encodings, and a broken pattern would
+// silently match nothing.
 var RULES = [
-  { calendar: 'cats', patterns: [/серетид/i, /преднизол/i] },
-  { calendar: 'personal', patterns: [/золофт/i, /english/i] },
-  { calendar: 'work', patterns: [/w3ds/i, /weekly/i, /ensemble/i, /daily/i, /дэйли/i, /sync/i, /standup/i] },
+  { calendar: 'cats', patterns: [/\u0441\u0435\u0440\u0435\u0442\u0438\u0434/i, /\u043f\u0440\u0435\u0434\u043d\u0438\u0437\u043e\u043b/i] },
+  { calendar: 'personal', patterns: [/\u0437\u043e\u043b\u043e\u0444\u0442/i, /english/i] },
+  { calendar: 'work', patterns: [/w3ds/i, /weekly/i, /ensemble/i, /daily/i, /\u0434\u044d\u0439\u043b\u0438/i, /sync/i, /standup/i] },
 ];
 
 // anyone from these domains makes an event work, whatever it is called
 var WORK_DOMAINS = ['time2map.com'];
 
 // events with these titles should not block your colleagues' scheduling
-var FREE_PATTERNS = [/серетид/i, /преднизол/i, /золофт/i, /english/i];
+var FREE_PATTERNS = [/\u0441\u0435\u0440\u0435\u0442\u0438\u0434/i, /\u043f\u0440\u0435\u0434\u043d\u0438\u0437\u043e\u043b/i, /\u0437\u043e\u043b\u043e\u0444\u0442/i, /english/i];
 
 var DAYS_BACK = 60;
 var DAYS_AHEAD = 120;
 
-// ── the run ─────────────────────────────────────────────────────────────────
+//  the run 
 function preview() { run(true); }
 function apply() { run(false); }
 
@@ -52,7 +55,7 @@ function run(dry) {
   // 1. colors
   Object.keys(COLORS).forEach(function (name) {
     var cal = calendars[name];
-    if (!cal) { Logger.log('no calendar named ' + name + ' — skipped'); return; }
+    if (!cal) { Logger.log('no calendar named ' + name + ' - skipped'); return; }
     Logger.log((dry ? 'would set' : 'set') + ' color of ' + name);
     if (!dry) cal.setColor(COLORS[name]);
   });
@@ -69,7 +72,7 @@ function run(dry) {
 
       // 2. triage: an event in the wrong calendar moves to the right one
       if (target && target !== name && calendars[target]) {
-        Logger.log((dry ? 'would move' : 'move') + ' "' + title + '"  ' + name + ' → ' + target);
+        Logger.log((dry ? 'would move' : 'move') + ' "' + title + '"  ' + name + '  ' + target);
         if (!dry) {
           Calendar.Events.move(calendarId(calendars[name]), event.getId().split('@')[0],
             calendarId(calendars[target]));
@@ -79,7 +82,7 @@ function run(dry) {
       }
 
       // 3. availability: a private block should not read as busy to colleagues.
-      // free/busy is `transparency`, which only the advanced service can set —
+      // free/busy is `transparency`, which only the advanced service can set -
       // CalendarApp's visibility is a different thing (who may see the event).
       if (matchesAny(title, FREE_PATTERNS) && !event.isAllDayEvent()) {
         try {
