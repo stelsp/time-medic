@@ -17,12 +17,15 @@
  */
 
 //  what goes where 
+// setColor takes a hex string, and these are Google's own palette values.
+// The enum was a trap: CalendarApp.Color has no CYAN or MAUVE, and asking for
+// one throws "Invalid argument: color" halfway through the run.
 var COLORS = {
-  work: CalendarApp.Color.CYAN,      // Peacock
-  cats: CalendarApp.Color.YELLOW,    // Banana
-  personal: CalendarApp.Color.MAUVE, // Lavender
-  main: CalendarApp.Color.GRAY,      // Graphite
-  Birthdays: CalendarApp.Color.PINK, // Flamingo
+  work: '#039BE5',      // Peacock
+  cats: '#F6BF26',      // Banana
+  personal: '#7986CB',  // Lavender
+  main: '#616161',      // Graphite
+  Birthdays: '#E67C73', // Flamingo
 };
 
 // an event whose title matches moves to that calendar
@@ -57,7 +60,10 @@ function run(dry) {
     var cal = calendars[name];
     if (!cal) { Logger.log('no calendar named ' + name + ' - skipped'); return; }
     Logger.log((dry ? 'would set' : 'set') + ' color of ' + name);
-    if (!dry) cal.setColor(COLORS[name]);
+    if (!dry) {
+      try { cal.setColor(COLORS[name]); }
+      catch (e) { Logger.log('  ! color of ' + name + ' refused: ' + e); }
+    }
   });
 
   var from = new Date(Date.now() - DAYS_BACK * 864e5);
