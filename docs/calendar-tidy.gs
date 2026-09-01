@@ -39,7 +39,8 @@ var EVENT_COLOR = { work: '7', cats: '5', personal: '1' }; // Peacock, Banana, L
 // event palette - 1 Lavender, 5 Banana, 7 Peacock, 8 Graphite, 11 Tomato.
 var OVERRIDES = [
   { patterns: [/achetut/i], color: '8' },  // Graphite: on the calendar, not on the clock
-  { patterns: [/ensemble/i], color: '7' }, // Peacock: work after all
+  { patterns: [/ensomble|ensemble/i], color: '7' }, // Peacock: work after all
+  { patterns: [/kuzbass/i], color: '7' },           // Peacock
 ];
 
 // an event whose title matches moves to that calendar
@@ -49,7 +50,7 @@ var OVERRIDES = [
 var RULES = [
   { calendar: 'cats', patterns: [/\u0441\u0435\u0440\u0435\u0442\u0438\u0434/i, /\u043f\u0440\u0435\u0434\u043d\u0438\u0437\u043e\u043b/i] },
   { calendar: 'personal', patterns: [/\u0437\u043e\u043b\u043e\u0444\u0442/i, /english/i] },
-  { calendar: 'work', patterns: [/w3ds/i, /weekly/i, /ensemble/i, /daily/i, /\u0434\u044d\u0439\u043b\u0438/i, /sync/i, /standup/i] },
+  { calendar: 'work', patterns: [/w3ds/i, /weekly/i, /ensomble/i, /ensemble/i, /daily/i, /\u0434\u044d\u0439\u043b\u0438/i, /sync/i, /standup/i] },
 ];
 
 // anyone from these domains makes an event work, whatever it is called
