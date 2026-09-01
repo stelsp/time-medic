@@ -179,20 +179,28 @@ function run(dry) {
     }
   });
 
-  // hand overrides win over everything decided above
-  var overridden = 0;
-  Object.keys(series).forEach(function (key) {
-    var s = series[key];
-    for (var i = 0; i < OVERRIDES.length; i++) {
-      if (!matchesAny(s.title, OVERRIDES[i].patterns)) continue;
-      Logger.log((dry ? 'would paint' : 'paint') + ' "' + s.title + '" as ' + OVERRIDES[i].color);
-      if (!dry) {
-        try { paint(s.ref, EVENT_COLOR[OVERRIDES[i].color]); }
-        catch (e) { Logger.log('  ! could not paint "' + s.title + '": ' + e); failed++; break; }
+  // Hand overrides win over everything decided above, and they sweep every
+  // calendar rather than the series collected earlier: the events that need an
+  // override are usually the invitations that could not be moved, and those
+  // only paint through the event object.
+  var overridden = 0, seen = {};
+  CalendarApp.getAllCalendars().forEach(function (cal) {
+    cal.getEvents(from, to).forEach(function (event) {
+      var title = event.getTitle();
+      for (var i = 0; i < OVERRIDES.length; i++) {
+        if (!matchesAny(title, OVERRIDES[i].patterns)) continue;
+        var key = cal.getId() + '|' + event.getId();
+        if (seen[key]) return;
+        seen[key] = true;
+        Logger.log((dry ? 'would paint' : 'paint') + ' "' + title + '" as ' + OVERRIDES[i].color);
+        if (!dry) {
+          try { paint(event, EVENT_COLOR[OVERRIDES[i].color]); }
+          catch (e) { Logger.log('  ! could not paint "' + title + '": ' + e); failed++; return; }
+        }
+        overridden++;
+        return;
       }
-      overridden++;
-      break;
-    }
+    });
   });
 
   Logger.log('--- ' + (dry ? 'PREVIEW' : 'APPLIED') + ': ' + overridden + ' overridden, ' +
