@@ -99,7 +99,10 @@ function run(dry) {
         } catch (e) { Logger.log('  ! could not move: ' + e); failed++; return; }
       }
       moved++;
-      s.calendar = s.target; // freeing below must patch it where it lives now
+      // only after a real move does the event live in the target calendar;
+      // in preview it is still where it was, and asking the target for it
+      // would fail with Not Found
+      if (!dry) s.calendar = s.target;
     } else {
       kept++;
     }
