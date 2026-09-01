@@ -62,8 +62,11 @@ var DAYS_BACK = 60;
 var DAYS_AHEAD = 120;
 
 //  the run 
-function preview() { run(true); }
+// apply comes first on purpose: the editor's function picker defaults to the
+// first function in the file, and hunting for the right entry in that dropdown
+// is how a "preview" ends up being the thing you keep running by accident.
 function apply() { run(false); }
+function preview() { run(true); }
 
 function run(dry) {
   var calendars = {};
