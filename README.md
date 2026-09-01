@@ -53,9 +53,38 @@ forget them.
 
 Set `CALENDAR=1` and run `timetop calendar` once from your own terminal: macOS
 asks for calendar access, you click Allow, and from then on meetings count as
-worked time. Only the shape of an event is read — start, end, calendar name,
-head count — never titles, unless you set `CALENDAR_TITLES=1`. Events you
-declined, all-day markers and anything marked free are not counted.
+worked time. Google, iCloud and Exchange calendars all arrive the same way, as
+long as the account is in the Calendar app.
+
+Only the shape of an event is read — start, end, calendar name, account, head
+count, and the *domains* of the people in it — never their addresses, and never
+titles unless you set `CALENDAR_TITLES=1`. Events you declined, all-day markers
+and anything marked free are not counted.
+
+**Work or personal** is decided without reading a single title:
+
+```
+timetop calendar --calendars     # what you have, and who you meet there
+```
+
+```
+CALENDAR          ACCOUNT   EVENTS      TIME  WHO YOU MEET
+work@company.com  Google        41    22h30m  company.com, client.com
+personal@gmail…   Google         6     4h10m  gmail.com
+```
+
+Name the work ones and the rest is left out of your totals:
+
+```
+WORK_CALENDARS=work@company.com
+WORK_DOMAINS=company.com
+```
+
+A calendar named in `WORK_CALENDARS` is work; one in `PERSONAL_CALENDARS` never
+is; otherwise an event counts as work when someone from a `WORK_DOMAINS` domain
+is in it. Personal events still appear in the report — as a count and a total
+that were deliberately left out — so you can see the classifier's work rather
+than trust it. `COUNT_PERSONAL=1` counts them too.
 
 ```
 WEEK 2026-W35 · Mon Aug 24 – Sun Aug 30

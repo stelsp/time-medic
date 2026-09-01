@@ -23,7 +23,8 @@ const usage = `timetop — autonomous time tracking from your work trail
   timetop watch              run the keyboard sensor in the foreground
   timetop watch --install    keep it running at login (launchd agent)
   timetop watch --stop       stop it and remove the agent
-  timetop calendar [when]    the meetings a period contains (needs CALENDAR=1)
+  timetop calendar [when]      the meetings a period contains (needs CALENDAR=1)
+  timetop calendar --calendars which calendars exist, so you can name the work ones
   timetop scan               refresh the cache and print what was found
   timetop prices             show the price table (from the claude CLI's own catalog)
   timetop prices --check     replay sessions and compare with Claude's own totals
@@ -132,32 +133,42 @@ func main() {
 				filepath.Join(configDir(), "config.env"))
 			return
 		}
-		p := Weekly(parseWeek(when))
-		events, err := CalendarEvents(cfg, p.From, p.To)
-		if len(events) == 0 && err == nil {
-			fmt.Println("no events in", p.Label)
+		if when == "--calendars" || when == "calendars" {
+			now := time.Now()
+			events, err := CalendarEvents(cfg, now.AddDate(0, 0, -30), now.AddDate(0, 0, 7))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			fmt.Print(RenderCalendars(cfg, events))
 			return
 		}
+		p := Weekly(parseWeek(when))
+		events, err := CalendarEvents(cfg, p.From, p.To)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		if len(events) == 0 {
+			fmt.Println("no events in", p.Label)
+			return
+		}
 		total := 0
 		for _, e := range events {
-			mark := " "
-			if e.Meeting(cfg.MeetingMinutes) {
-				mark = "•"
+			mark := dim.Render("·")
+			if e.Counts(cfg) {
+				mark = green.Render("•")
 				total += int(e.End.Sub(e.Start).Minutes())
 			}
 			label := e.Calendar
 			if e.Title != "" {
 				label = e.Title
 			}
-			fmt.Printf("%s %s %s–%s %8s  %-28s %d people\n", mark, e.Start.Format("Mon 02 Jan"),
+			fmt.Printf("%s %s %s–%s %8s  %-28s %-8s %d people\n", mark, e.Start.Format("Mon 02 Jan"),
 				e.Start.Format("15:04"), e.End.Format("15:04"),
-				hm(int(e.End.Sub(e.Start).Minutes())), trunc(label, 28), e.People)
+				hm(int(e.End.Sub(e.Start).Minutes())), trunc(label, 28), e.Kind(cfg), e.People)
 		}
-		fmt.Printf("\n%d events, %s counted as worked time (• = counted)\n", len(events), hm(total))
+		fmt.Printf("\n%d events, %s counted as worked time (• counted, · left out)\n", len(events), hm(total))
 	case "prices":
 		pt := LoadPrices(cfg)
 		if when == "--check" || when == "check" {

@@ -549,3 +549,63 @@ func TestReadSamplesWithoutASensorIsNotAnError(t *testing.T) {
 		t.Fatalf("a machine with no sensor simply has no samples: %v %v", apps, err)
 	}
 }
+
+func TestEventKindReadsCalendarsAndDomainsNotTitles(t *testing.T) {
+	cfg := Config{
+		WorkCalendars:     []string{"slava@time2map.com"},
+		PersonalCalendars: []string{"Family"},
+		WorkDomains:       []string{"time2map.com"},
+		MeetingMinutes:    10,
+	}
+	start := time.Date(2026, 9, 1, 10, 0, 0, 0, time.Local)
+	hour := func(cal string, domains ...string) Event {
+		return Event{Start: start, End: start.Add(time.Hour), Calendar: cal,
+			Busy: true, People: len(domains), Domains: domains}
+	}
+	cases := []struct {
+		event Event
+		want  string
+	}{
+		{hour("slava@time2map.com"), "work"},
+		{hour("Family", "time2map.com"), "personal"}, // an explicit personal calendar wins
+		{hour("stelspeh@gmail.com", "time2map.com"), "work"},
+		{hour("stelspeh@gmail.com", "gmail.com"), "personal"},
+		{hour("stelspeh@gmail.com"), "personal"},
+	}
+	for _, c := range cases {
+		if got := c.event.Kind(cfg); got != c.want {
+			t.Fatalf("%s / %v: got %q want %q", c.event.Calendar, c.event.Domains, got, c.want)
+		}
+	}
+	// with nothing configured, nothing is claimed
+	if got := (hour("whatever")).Kind(Config{MeetingMinutes: 10}); got != "unknown" {
+		t.Fatalf("unconfigured: %q", got)
+	}
+}
+
+func TestPersonalEventsAreReportedButNotCounted(t *testing.T) {
+	cfg := Config{GapMinutes: 15, MeetingMinutes: 10, WorkCalendars: []string{"Work"}}
+	start := time.Date(2026, 9, 1, 10, 0, 0, 0, time.Local)
+	act := &Activity{
+		Minutes: map[string]map[minute]bool{}, Tasks: map[string]map[minute]bool{},
+		Roots: map[string]string{},
+		Events: []Event{
+			{Start: start, End: start.Add(time.Hour), Calendar: "Work", Busy: true},
+			{Start: start.Add(2 * time.Hour), End: start.Add(3 * time.Hour), Calendar: "Dentist", Busy: true},
+		},
+	}
+	rep := Build(act, cfg, Daily(start))
+	if rep.MeetingMins != 60 || len(rep.Meetings) != 1 {
+		t.Fatalf("work meeting: %d minutes, %d events", rep.MeetingMins, len(rep.Meetings))
+	}
+	if rep.Personal != 1 || rep.PersonalMins != 60 {
+		t.Fatalf("personal must be visible but uncounted: %d events, %d minutes", rep.Personal, rep.PersonalMins)
+	}
+	if rep.TotalMins != 60 {
+		t.Fatalf("wall clock must exclude personal time: %d", rep.TotalMins)
+	}
+	cfg.CountPersonal = true
+	if rep := Build(act, cfg, Daily(start)); rep.TotalMins != 120 {
+		t.Fatalf("COUNT_PERSONAL=1 counts it: %d", rep.TotalMins)
+	}
+}

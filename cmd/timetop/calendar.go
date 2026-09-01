@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -19,11 +20,55 @@ import (
 type Event struct {
 	Start    time.Time `json:"start"`
 	End      time.Time `json:"end"`
-	Calendar string    `json:"calendar"`
+	Calendar string    `json:"calendar"` // the calendar's own name, often an address
+	Source   string    `json:"source"`   // the account behind it: Google, iCloud, Exchange
 	Busy     bool      `json:"busy"`
 	AllDay   bool      `json:"allDay"`
 	People   int       `json:"people"`
-	Title    string    `json:"title,omitempty"` // only with CALENDAR_TITLES=1
+	Domains  []string  `json:"domains,omitempty"` // attendee domains only, never addresses
+	Meet     string    `json:"meet,omitempty"`    // conferencing host, if the event has one
+	Title    string    `json:"title,omitempty"`   // only with CALENDAR_TITLES=1
+}
+
+// Kind separates the work day from the rest of life. It reads the calendar it
+// came from first, then the domains of the people in it — never the title, so
+// the classification works with titles switched off.
+func (e Event) Kind(cfg Config) string {
+	for _, name := range cfg.PersonalCalendars {
+		if strings.EqualFold(e.Calendar, name) {
+			return "personal"
+		}
+	}
+	for _, name := range cfg.WorkCalendars {
+		if strings.EqualFold(e.Calendar, name) {
+			return "work"
+		}
+	}
+	for _, d := range e.Domains {
+		for _, work := range cfg.WorkDomains {
+			if strings.EqualFold(d, work) {
+				return "work"
+			}
+		}
+	}
+	// a solo entry in an unnamed calendar is a block in a diary, not a meeting
+	if len(cfg.WorkCalendars) > 0 || len(cfg.WorkDomains) > 0 {
+		return "personal"
+	}
+	return "unknown"
+}
+
+// Counts reports whether this event should be billed as worked time.
+func (e Event) Counts(cfg Config) bool {
+	if !e.Meeting(cfg.MeetingMinutes) {
+		return false
+	}
+	switch e.Kind(cfg) {
+	case "personal":
+		return cfg.CountPersonal
+	default:
+		return true
+	}
 }
 
 // Meeting reports whether an event is time actually spent, as opposed to a
@@ -228,13 +273,28 @@ for event in store.events(matching: predicate) {
         declined = attendee.participantStatus == .declined
     }
     if declined { continue }
+    // attendee domains, never addresses: enough to tell a work meeting from a
+    // dentist appointment, useless for anything else
+    var domains: Set<String> = []
+    for attendee in event.attendees ?? [] {
+        guard let url = attendee.url as URL?, url.scheme == "mailto" else { continue }
+        let address = url.absoluteString.replacingOccurrences(of: "mailto:", with: "")
+        if let at = address.firstIndex(of: "@") {
+            domains.insert(String(address[address.index(after: at)...]).lowercased())
+        }
+    }
+    var meet = ""
+    if let host = event.url?.host { meet = host }
     var row: [String: Any] = [
         "start": iso.string(from: start),
         "end": iso.string(from: end),
         "calendar": event.calendar?.title ?? "",
+        "source": event.calendar?.source?.title ?? "",
         "busy": event.availability != .free,
         "allDay": event.isAllDay,
         "people": event.attendees?.count ?? 0,
+        "domains": Array(domains),
+        "meet": meet,
     ]
     if withTitles { row["title"] = event.title ?? "" }
     rows.append(row)
@@ -242,3 +302,58 @@ for event in store.events(matching: predicate) {
 let data = try JSONSerialization.data(withJSONObject: rows, options: [])
 FileHandle.standardOutput.write(data)
 `
+
+// RenderCalendars shows what the account actually holds, so the work ones can
+// be named in the config instead of guessed at by a heuristic.
+func RenderCalendars(cfg Config, events []Event) string {
+	type stat struct {
+		name, source string
+		events, mins int
+		domains      map[string]int
+	}
+	byCal := map[string]*stat{}
+	for _, e := range events {
+		key := e.Source + "\x1f" + e.Calendar
+		s := byCal[key]
+		if s == nil {
+			s = &stat{name: e.Calendar, source: e.Source, domains: map[string]int{}}
+			byCal[key] = s
+		}
+		s.events++
+		s.mins += int(e.End.Sub(e.Start).Minutes())
+		for _, d := range e.Domains {
+			s.domains[d]++
+		}
+	}
+	stats := make([]*stat, 0, len(byCal))
+	for _, s := range byCal {
+		stats = append(stats, s)
+	}
+	sort.Slice(stats, func(i, j int) bool {
+		if stats[i].mins != stats[j].mins {
+			return stats[i].mins > stats[j].mins
+		}
+		return stats[i].name < stats[j].name
+	})
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-34s %-12s %7s %9s  %s\n", "CALENDAR", "ACCOUNT", "EVENTS", "TIME", "WHO YOU MEET")
+	for _, s := range stats {
+		doms := make([]string, 0, len(s.domains))
+		for d := range s.domains {
+			doms = append(doms, d)
+		}
+		sort.Slice(doms, func(i, j int) bool { return s.domains[doms[i]] > s.domains[doms[j]] })
+		if len(doms) > 3 {
+			doms = doms[:3]
+		}
+		fmt.Fprintf(&b, "%-34s %-12s %7d %9s  %s\n", trunc(s.name, 34), trunc(s.source, 12),
+			s.events, hm(s.mins), strings.Join(doms, ", "))
+	}
+	fmt.Fprint(&b, "\nname the work ones in "+filepath.Join(configDir(), "config.env")+":\n"+
+		"  WORK_CALENDARS=<calendar>,<calendar>\n"+
+		"  WORK_DOMAINS=<the domain your colleagues use>\n"+
+		"anything else is treated as personal and left out of the totals\n"+
+		"(COUNT_PERSONAL=1 counts it too).\n")
+	return b.String()
+}

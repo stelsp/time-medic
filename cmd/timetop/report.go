@@ -56,25 +56,27 @@ type TaskStat struct {
 
 type Report struct {
 	Period
-	TotalMins   int            // wall clock: minutes any source can prove, overlaps counted once
-	AgentMins   int            // of those, minutes that only an unattended run was awake for
-	SessionMins int            // minutes a Claude Code session can account for
-	AppMins     map[string]int // minutes at the keyboard, by application
-	AppTotal    int            // their union: time at this machine, whatever the app
-	MeetingMins int            // minutes the calendar accounts for
-	Meetings    []Event        // the meetings themselves, in order
-	SumMins     int            // sum over projects; larger than TotalMins when work overlaps
-	Days        []DayStat
-	Projects    []ProjStat
-	Sessions    []Session
-	Tasks       []TaskStat
-	Tokens      map[string]*Tokens // model -> tokens burned in the period
-	Prices      PriceTable         // whatever price list the config points at
-	Cost        map[string]float64 // model -> dollars, only for priced models
-	CostTotal   float64
-	Unpriced    []string // models seen but absent from the price table
-	PrevMins    int      // wall clock of the period before this one
-	Gap         int
+	TotalMins    int            // wall clock: minutes any source can prove, overlaps counted once
+	AgentMins    int            // of those, minutes that only an unattended run was awake for
+	SessionMins  int            // minutes a Claude Code session can account for
+	AppMins      map[string]int // minutes at the keyboard, by application
+	AppTotal     int            // their union: time at this machine, whatever the app
+	MeetingMins  int            // minutes the calendar accounts for
+	Meetings     []Event        // the meetings counted as work, in order
+	PersonalMins int            // time in events classified as personal, not counted
+	Personal     int            // how many such events there were
+	SumMins      int            // sum over projects; larger than TotalMins when work overlaps
+	Days         []DayStat
+	Projects     []ProjStat
+	Sessions     []Session
+	Tasks        []TaskStat
+	Tokens       map[string]*Tokens // model -> tokens burned in the period
+	Prices       PriceTable         // whatever price list the config points at
+	Cost         map[string]float64 // model -> dollars, only for priced models
+	CostTotal    float64
+	Unpriced     []string // models seen but absent from the price table
+	PrevMins     int      // wall clock of the period before this one
+	Gap          int
 	// CoverageFrom is the oldest minute any transcript can prove.
 	CoverageFrom time.Time
 }
@@ -218,6 +220,11 @@ func Build(act *Activity, cfg Config, p Period) Report {
 	meetWall := map[minute]bool{}
 	for _, e := range act.Events {
 		if !e.Meeting(cfg.MeetingMinutes) || !e.End.After(p.From) || !e.Start.Before(p.To) {
+			continue
+		}
+		if !e.Counts(cfg) {
+			rep.Personal++
+			rep.PersonalMins += int(e.End.Sub(e.Start).Minutes())
 			continue
 		}
 		rep.Meetings = append(rep.Meetings, e)
@@ -570,6 +577,9 @@ func RenderWeekly(rep Report, md bool) string {
 				hm(int(e.End.Sub(e.Start).Minutes())), trunc(label, 40))
 		}
 		fmt.Fprintf(&b, "%s in meetings\n", hm(rep.MeetingMins))
+		if rep.Personal > 0 {
+			fmt.Fprintf(&b, "%d personal event(s), %s, left out\n", rep.Personal, hm(rep.PersonalMins))
+		}
 		fmt.Fprint(&b, post(md)+"\n")
 	}
 

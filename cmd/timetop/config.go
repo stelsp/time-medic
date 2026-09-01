@@ -11,21 +11,25 @@ import (
 )
 
 type Config struct {
-	TranscriptDir  string            // where Claude Code keeps session logs
-	GapMinutes     int               // idle gap that ends a work session
-	TargetHours    float64           // weekly target, drives the gauge
-	Author         string            // git author filter (email or name)
-	Aliases        map[string]string // raw project name -> reporting name
-	SlackWebhook   string            // incoming webhook, used only with --slack
-	IdleSeconds    int               // input older than this means nobody was there
-	Calendar       bool              // read meetings from the calendar at all
-	CalendarTitles bool              // include event titles (off: only times and shape)
-	Calendars      []string          // only these calendars, empty means all
-	MeetingMinutes int               // shorter events are not counted as worked time
-	AppCategories  map[string]string // app name -> what that time is
-	Prices         string            // inline price table, dollars per Mtok
-	PricesFile     string            // path to a JSON price table (LiteLLM shape works)
-	StateDir       string
+	TranscriptDir     string            // where Claude Code keeps session logs
+	GapMinutes        int               // idle gap that ends a work session
+	TargetHours       float64           // weekly target, drives the gauge
+	Author            string            // git author filter (email or name)
+	Aliases           map[string]string // raw project name -> reporting name
+	SlackWebhook      string            // incoming webhook, used only with --slack
+	IdleSeconds       int               // input older than this means nobody was there
+	Calendar          bool              // read meetings from the calendar at all
+	CalendarTitles    bool              // include event titles (off: only times and shape)
+	Calendars         []string          // only these calendars, empty means all
+	WorkCalendars     []string          // calendars whose events are work
+	PersonalCalendars []string          // calendars whose events are not
+	WorkDomains       []string          // attendee domains that make a meeting work
+	CountPersonal     bool              // count personal events as worked time too
+	MeetingMinutes    int               // shorter events are not counted as worked time
+	AppCategories     map[string]string // app name -> what that time is
+	Prices            string            // inline price table, dollars per Mtok
+	PricesFile        string            // path to a JSON price table (LiteLLM shape works)
+	StateDir          string
 }
 
 func configDir() string {
@@ -78,12 +82,15 @@ func LoadConfig() Config {
 		case "CALENDAR_TITLES":
 			cfg.CalendarTitles = val == "1" || strings.EqualFold(val, "true")
 		case "CALENDARS":
-			cfg.Calendars = nil
-			for _, name := range strings.Split(val, ",") {
-				if name = strings.TrimSpace(name); name != "" {
-					cfg.Calendars = append(cfg.Calendars, name)
-				}
-			}
+			cfg.Calendars = splitList(val)
+		case "WORK_CALENDARS":
+			cfg.WorkCalendars = splitList(val)
+		case "PERSONAL_CALENDARS":
+			cfg.PersonalCalendars = splitList(val)
+		case "WORK_DOMAINS":
+			cfg.WorkDomains = splitList(val)
+		case "COUNT_PERSONAL":
+			cfg.CountPersonal = val == "1" || strings.EqualFold(val, "true")
 		case "MEETING_MINUTES":
 			if n, e := strconv.Atoi(val); e == nil && n >= 0 {
 				cfg.MeetingMinutes = n
@@ -128,4 +135,15 @@ func expand(p, home string) string {
 		return filepath.Join(home, p[2:])
 	}
 	return p
+}
+
+// splitList reads a comma-separated config value, dropping empty entries.
+func splitList(val string) []string {
+	var out []string
+	for _, item := range strings.Split(val, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
