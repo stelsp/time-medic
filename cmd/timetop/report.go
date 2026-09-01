@@ -14,6 +14,25 @@ type Period struct {
 	Label    string
 }
 
+// MeetingStat is a meeting plus what else was happening during it. A call you
+// coded through is still one hour of your life, not two.
+type MeetingStat struct {
+	Event
+	Overlap int // minutes of it you were also at the keyboard or in a session
+}
+
+// Split says how the meeting's time was actually spent.
+func (m MeetingStat) Split() string {
+	total := int(m.End.Sub(m.Start).Minutes())
+	switch {
+	case m.Overlap == 0:
+		return "listening"
+	case m.Overlap >= total:
+		return "worked through"
+	}
+	return fmt.Sprintf("%s worked", hm(m.Overlap))
+}
+
 type Session struct {
 	Project    string
 	Start, End time.Time
@@ -62,7 +81,8 @@ type Report struct {
 	AppMins      map[string]int // minutes at the keyboard, by application
 	AppTotal     int            // their union: time at this machine, whatever the app
 	MeetingMins  int            // minutes the calendar accounts for
-	Meetings     []Event        // the meetings counted as work, in order
+	Meetings     []MeetingStat  // the meetings counted as work, in order
+	MeetingSolo  int            // meeting minutes with nothing else running
 	PersonalMins int            // time in events classified as personal, not counted
 	Personal     int            // how many such events there were
 	SumMins      int            // sum over projects; larger than TotalMins when work overlaps
@@ -125,8 +145,9 @@ func Build(act *Activity, cfg Config, p Period) Report {
 	days := map[string]*DayStat{}
 	projMins := map[string]int{}
 	projSess := map[string]int{}
-	wall := map[minute]bool{}   // union across projects: real elapsed time
+	wall := map[minute]bool{}   // union across every source: real elapsed time
 	dayWall := map[string]int{} // same, per day
+	sessionWall := map[minute]bool{}
 
 	for proj, set := range act.Minutes {
 		var mins []int64
@@ -148,6 +169,7 @@ func Build(act *Activity, cfg Config, p Period) Report {
 			key := t.Format("2006-01-02")
 			if !wall[minute(m)] {
 				wall[minute(m)] = true
+				sessionWall[minute(m)] = true
 				dayWall[key]++
 			}
 			d := days[key]
@@ -227,20 +249,30 @@ func Build(act *Activity, cfg Config, p Period) Report {
 			rep.PersonalMins += int(e.End.Sub(e.Start).Minutes())
 			continue
 		}
-		rep.Meetings = append(rep.Meetings, e)
+		stat := MeetingStat{Event: e}
 		for _, m := range e.Minutes() {
 			t := time.Unix(int64(m)*60, 0)
 			if t.Before(p.From) || !t.Before(p.To) {
 				continue
 			}
 			meetWall[m] = true
-			if !wall[m] {
+			if wall[m] {
+				// the call ran while a session or the keyboard was live: one
+				// minute of life, spent on two things
+				stat.Overlap++
+			} else {
 				wall[m] = true
 				dayWall[t.Format("2006-01-02")]++
 			}
 		}
+		rep.Meetings = append(rep.Meetings, stat)
 	}
 	rep.MeetingMins = len(meetWall)
+	for m := range meetWall {
+		if !sessionWall[m] && !appWall[m] {
+			rep.MeetingSolo++
+		}
+	}
 	sort.Slice(rep.Meetings, func(i, j int) bool { return rep.Meetings[i].Start.Before(rep.Meetings[j].Start) })
 	rep.TotalMins = len(wall)
 
@@ -572,11 +604,12 @@ func RenderWeekly(rep Report, md bool) string {
 			if e.Title != "" {
 				label = e.Title
 			}
-			fmt.Fprintf(&b, "%s  %s–%s %8s  %s\n", e.Start.Format("Mon 02"),
+			fmt.Fprintf(&b, "%s  %s–%s %8s  %-30s %s\n", e.Start.Format("Mon 02"),
 				e.Start.Format("15:04"), e.End.Format("15:04"),
-				hm(int(e.End.Sub(e.Start).Minutes())), trunc(label, 40))
+				hm(int(e.End.Sub(e.Start).Minutes())), trunc(label, 30), e.Split())
 		}
-		fmt.Fprintf(&b, "%s in meetings\n", hm(rep.MeetingMins))
+		fmt.Fprintf(&b, "%s in meetings, %s of it with nothing else running\n",
+			hm(rep.MeetingMins), hm(rep.MeetingSolo))
 		if rep.Personal > 0 {
 			fmt.Fprintf(&b, "%d personal event(s), %s, left out\n", rep.Personal, hm(rep.PersonalMins))
 		}
@@ -986,7 +1019,11 @@ func (r Report) SourceLine() string {
 		parts = append(parts, hm(outside)+" elsewhere at the keyboard")
 	}
 	if r.MeetingMins > 0 {
-		parts = append(parts, hm(r.MeetingMins)+" in meetings")
+		meetings := hm(r.MeetingMins) + " in meetings"
+		if shared := r.MeetingMins - r.MeetingSolo; shared > 0 {
+			meetings += fmt.Sprintf(" (%s of it worked through)", hm(shared))
+		}
+		parts = append(parts, meetings)
 	}
 	return strings.Join(parts, " · ")
 }

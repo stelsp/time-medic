@@ -86,6 +86,19 @@ is in it. Personal events still appear in the report — as a count and a total
 that were deliberately left out — so you can see the classifier's work rather
 than trust it. `COUNT_PERSONAL=1` counts them too.
 
+**A call you code through is one hour, not two.** Meeting minutes are unioned
+with everything else, and every meeting says what else was running during it:
+
+```
+Tue 01  13:00–13:45      45m  work                           30m worked
+Thu 03  19:00–20:30    1h30m  work                           listening
+2h15m in meetings, 1h45m of it with nothing else running
+```
+
+That difference is the interesting number: an hour of undivided attention and
+an hour of half-listening are not the same hour, and only the calendar plus the
+transcripts together can tell them apart.
+
 ```
 WEEK 2026-W35 · Mon Aug 24 – Sun Aug 30
 

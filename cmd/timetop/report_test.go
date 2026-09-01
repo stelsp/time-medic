@@ -609,3 +609,46 @@ func TestPersonalEventsAreReportedButNotCounted(t *testing.T) {
 		t.Fatalf("COUNT_PERSONAL=1 counts it: %d", rep.TotalMins)
 	}
 }
+
+func TestAMeetingCodedThroughIsCountedOnceAndSaidSo(t *testing.T) {
+	start := time.Date(2026, 9, 1, 10, 0, 0, 0, time.Local)
+	base := start.Unix() / 60
+	session := map[minute]bool{}
+	for i := int64(0); i < 30; i++ { // half the call was spent in a session
+		session[minute(base+i)] = true
+	}
+	act := &Activity{
+		Minutes: map[string]map[minute]bool{"proj": session},
+		Tasks:   map[string]map[minute]bool{},
+		Roots:   map[string]string{},
+		Events:  []Event{{Start: start, End: start.Add(time.Hour), Calendar: "work", Busy: true}},
+	}
+	cfg := Config{GapMinutes: 15, MeetingMinutes: 10, WorkCalendars: []string{"work"}}
+	rep := Build(act, cfg, Daily(start))
+
+	if rep.TotalMins != 60 {
+		t.Fatalf("an hour is an hour however many things happened in it: %d", rep.TotalMins)
+	}
+	if rep.SessionMins != 30 || rep.MeetingMins != 60 {
+		t.Fatalf("session %d, meeting %d", rep.SessionMins, rep.MeetingMins)
+	}
+	if rep.MeetingSolo != 30 {
+		t.Fatalf("only half the call had nothing else running: %d", rep.MeetingSolo)
+	}
+	m := rep.Meetings[0]
+	if m.Overlap != 30 || m.Split() != "30m worked" {
+		t.Fatalf("overlap %d, split %q", m.Overlap, m.Split())
+	}
+	if line := rep.SourceLine(); !strings.Contains(line, "30m of it worked through") {
+		t.Fatalf("source line must admit the overlap: %q", line)
+	}
+
+	// a call with nothing else running reads as listening
+	quiet := Build(&Activity{
+		Minutes: map[string]map[minute]bool{}, Tasks: map[string]map[minute]bool{},
+		Roots: map[string]string{}, Events: act.Events,
+	}, cfg, Daily(start))
+	if quiet.Meetings[0].Split() != "listening" {
+		t.Fatalf("split: %q", quiet.Meetings[0].Split())
+	}
+}

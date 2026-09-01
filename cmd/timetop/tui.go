@@ -492,9 +492,10 @@ func (m model) dayBody(rows int) string {
 			if e.Title != "" {
 				label = e.Title
 			}
-			lines = append(lines, fmt.Sprintf(" %s–%s %8s  %s",
+			lines = append(lines, fmt.Sprintf(" %s–%s %8s  %-30s %s",
 				e.Start.Format("15:04"), e.End.Format("15:04"),
-				hm(int(e.End.Sub(e.Start).Minutes())), trunc(label, 40)))
+				hm(int(e.End.Sub(e.Start).Minutes())), trunc(label, 30),
+				dim.Render(e.Split())))
 		}
 	}
 	if apps := day.AppsRanked(); len(apps) > 0 {
