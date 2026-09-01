@@ -1,0 +1,84 @@
+#!/bin/bash
+# timewatch — console interface to time-medic, the way mrwatch is to merge-medic.
+#   timewatch              the dashboard
+#   timewatch today        today, session by session
+#   timewatch yesterday    the same for yesterday
+#   timewatch week [when]  the weekly (this | last | -N | YYYY-MM-DD)
+#   timewatch tasks [when] one line per branch: time, state, commits
+#   timewatch cal [when]   the meetings a period contains
+#   timewatch calendars    which calendars exist, so you can name the work ones
+#   timewatch on           start the keyboard sensor and keep it starting at login
+#   timewatch off          stop it and remove the login agent
+#   timewatch status       what is running, what is tracked, what it cost
+#   timewatch spend        the price table and how it checks out
+#   timewatch log          tail the sensor's own errors
+#   timewatch scan         refresh the cache and print all-time totals
+# Any flag (--md, --out, --full, --slack) is passed straight through.
+set -euo pipefail
+
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do SELF="$(readlink "$SELF")"; done
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd -P)"
+
+# prefer the binary next to this script, then the built one, then the PATH
+if [ -x "$ROOT/bin/timetop" ]; then TIMETOP="$ROOT/bin/timetop"
+elif command -v timetop >/dev/null 2>&1; then TIMETOP="$(command -v timetop)"
+else
+  echo "timetop is not built or installed — run 'make install' in $ROOT" >&2
+  exit 1
+fi
+
+STATE="${XDG_CONFIG_HOME:-$HOME/.config}/timetop/state"
+B=$(tput bold 2>/dev/null || true); N=$(tput sgr0 2>/dev/null || true)
+DIM=$(tput dim 2>/dev/null || true)
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift || true
+
+case "$cmd" in
+  ""|dash|top)   exec "$TIMETOP" "$@" ;;
+  today)         exec "$TIMETOP" daily today "$@" ;;
+  yesterday|y)   exec "$TIMETOP" daily yesterday "$@" ;;
+  day)           exec "$TIMETOP" daily "$@" ;;
+  week|weekly|w) exec "$TIMETOP" weekly "$@" ;;
+  tasks|t)       exec "$TIMETOP" tasks "$@" ;;
+  cal|meetings)  exec "$TIMETOP" calendar "$@" ;;
+  calendars)     exec "$TIMETOP" calendar --calendars "$@" ;;
+  scan)          exec "$TIMETOP" scan "$@" ;;
+  spend|prices)  exec "$TIMETOP" prices "$@" ;;
+  check)         exec "$TIMETOP" prices --check "$@" ;;
+  on|start)      exec "$TIMETOP" watch --install ;;
+  off|stop)      exec "$TIMETOP" watch --stop ;;
+  watch)         exec "$TIMETOP" watch "$@" ;;
+
+  log)
+    if [ -s "$STATE/sampler.err" ]; then
+      tail -n "${1:-40}" "$STATE/sampler.err"
+    else
+      echo "the sensor has logged no errors"
+    fi
+    ;;
+
+  status)
+    printf '%s\n' "${B}time-medic${N}"
+    "$TIMETOP" watch --status
+    if [ -f "$STATE/samples.log" ]; then
+      first=$(head -1 "$STATE/samples.log" | cut -d'|' -f1)
+      last=$(tail -1 "$STATE/samples.log" | cut -d'|' -f1)
+      lines=$(wc -l < "$STATE/samples.log" | tr -d ' ')
+      printf 'samples: %s, from %s to %s\n' "$lines" \
+        "$(date -r "$first" '+%d %b %H:%M' 2>/dev/null || echo '?')" \
+        "$(date -r "$last" '+%d %b %H:%M' 2>/dev/null || echo '?')"
+    else
+      printf 'samples: none yet (timewatch on)\n'
+    fi
+    printf '%s\n' "${DIM}today${N}"
+    "$TIMETOP" daily today | sed -n '3,8p'
+    ;;
+
+  -h|--help|help) sed -n '2,17p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+  *)
+    echo "timewatch: unknown command '$cmd'" >&2
+    sed -n '2,17p' "$SELF" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+    ;;
+esac

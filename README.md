@@ -123,6 +123,22 @@ make install        # builds bin/timetop and copies it to ~/.local/bin
 
 ## Use
 
+`timewatch` is the console front door, the way `mrwatch` is for merge-medic —
+short verbs for the things you do daily:
+
+```
+timewatch              the dashboard
+timewatch today        today, session by session
+timewatch week last    last week's report
+timewatch tasks        one line per branch: time, state, commits
+timewatch cal          the meetings a period contains
+timewatch on / off     start or stop the keyboard sensor
+timewatch status       what is running, what is tracked, what it cost
+timewatch spend        the price table; `timewatch check` audits it
+```
+
+`timetop` underneath it takes the full set of commands and flags:
+
 ```
 timetop                     dashboard: three screens over the same minutes
 timetop weekly last         last week's report

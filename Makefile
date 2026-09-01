@@ -12,8 +12,10 @@ clean:
 lint:
 	gofmt -l cmd/
 	go vet ./...
+	shellcheck bin/timewatch
 
 install: build
 	install -d $(HOME)/.local/bin
 	install -m 0755 bin/timetop $(HOME)/.local/bin/timetop
-	@echo "installed to $(HOME)/.local/bin/timetop"
+	install -m 0755 bin/timewatch $(HOME)/.local/bin/timewatch
+	@echo "installed timetop and timewatch to $(HOME)/.local/bin"
