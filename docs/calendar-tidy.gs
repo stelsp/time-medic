@@ -28,6 +28,12 @@ var COLORS = {
   Birthdays: '#E67C73', // Flamingo
 };
 
+// An invitation somebody else owns cannot be moved into another calendar -
+// Google refuses to change the organizer's copy. Painting it with the target
+// calendar's colour is the next best thing: it reads as work at a glance and
+// stays where the invitation landed.
+var EVENT_COLOR = { work: '7', cats: '5', personal: '1' }; // Peacock, Banana, Lavender
+
 // an event whose title matches moves to that calendar
 // Cyrillic is written as escapes on purpose: this file travels through
 // clipboards and editors that mangle encodings, and a broken pattern would
@@ -90,7 +96,7 @@ function run(dry) {
     });
   });
 
-  var moved = 0, freed = 0, kept = 0, failed = 0;
+  var moved = 0, freed = 0, kept = 0, failed = 0, painted = 0;
   Object.keys(series).forEach(function (key) {
     var s = series[key];
     var where = ' (' + s.count + (s.count === 1 ? ' event)' : ' occurrences)');
@@ -98,17 +104,30 @@ function run(dry) {
     if (s.target && s.target !== s.calendar && calendars[s.target]) {
       Logger.log((dry ? 'would move' : 'move') + ' "' + s.title + '"  ' +
         s.calendar + ' -> ' + s.target + where);
+      var movedThis = true;
       if (!dry) {
         try {
           Calendar.Events.move(calendarId(calendars[s.calendar]), s.id,
             calendarId(calendars[s.target]));
-        } catch (e) { Logger.log('  ! could not move: ' + e); failed++; return; }
+        } catch (e) {
+          movedThis = false;
+          // somebody else owns this invitation: colour it instead
+          var color = EVENT_COLOR[s.target];
+          if (color) {
+            try {
+              Calendar.Events.patch({ colorId: color }, calendarId(calendars[s.calendar]), s.id);
+              Logger.log('  cannot move an invitation - painted it ' + s.target + ' instead');
+              painted++;
+            } catch (e2) { Logger.log('  ! could not paint: ' + e2); failed++; }
+          } else { Logger.log('  ! could not move: ' + e); failed++; }
+        }
       }
-      moved++;
+      if (movedThis) moved++;
       // only after a real move does the event live in the target calendar;
       // in preview it is still where it was, and asking the target for it
       // would fail with Not Found
-      if (!dry) s.calendar = s.target;
+      if (!dry && movedThis) s.calendar = s.target;
+      if (!movedThis) return;
     } else {
       kept++;
     }
@@ -132,7 +151,8 @@ function run(dry) {
 
   Logger.log('--- ' + (dry ? 'PREVIEW' : 'APPLIED') + ': ' +
     Object.keys(series).length + ' series, ' + moved + ' to move, ' +
-    freed + ' to mark free, ' + kept + ' already in place, ' + failed + ' failed ---');
+    freed + ' to mark free, ' + painted + ' painted in place, ' +
+    kept + ' already right, ' + failed + ' failed ---');
 }
 
 function targetFor(title, event) {
