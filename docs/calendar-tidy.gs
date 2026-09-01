@@ -57,7 +57,7 @@ function paint(event, color) {
 var OVERRIDES = [
   { patterns: [/achetut/i], color: 'graphite' }, // on the calendar, not on the clock
   { patterns: [/ensomble|ensemble/i], color: 'work' },
-  { patterns: [/kuzbass/i], color: 'work' },
+  { patterns: [/kuzbass/i], color: 'graphite' }, // on the calendar, not on the clock
 ];
 
 // an event whose title matches moves to that calendar
